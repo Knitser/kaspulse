@@ -132,6 +132,34 @@ fn geckoterminal(ticks: &[&str]) -> HashMap<String, f64> {
     }
     let c = cache.lock().unwrap(); for t in ticks { if !m.contains_key(*t) { if let Some(v) = c.get(*t) { m.insert(t.to_string(), *v); } } } m
 }
+// ---------- direct Kasplex DEX pool read — OUR OWN on-chain source ----------
+// eth_call getReserves() on the token/WKAS pool, price in WKAS × our KAS/USD.
+// No third-party API — anyone can re-run the same call and verify it.
+const KASPLEX_RPC: &str = "https://evmrpc.kasplex.org";
+struct PoolCfg { token: &'static str, pool: &'static str, wkas_is_token0: bool } // WKAS + KRC-20 both 18-dec on Kasplex
+fn pools() -> Vec<PoolCfg> {
+    vec![PoolCfg { token: "NACHO/USD", pool: "0xb905105452e5bedb1e6bd2d8c57e2b70f5a7349a", wkas_is_token0: true }]
+}
+fn eth_call(a: &ureq::Agent, to: &str, data: &str) -> Option<String> {
+    let body = format!(r#"{{"jsonrpc":"2.0","method":"eth_call","params":[{{"to":"{to}","data":"{data}"}},"latest"],"id":1}}"#);
+    let j: serde_json::Value = a.post(KASPLEX_RPC).set("content-type", "application/json").send_string(&body).ok()?.into_json().ok()?;
+    j["result"].as_str().map(|s| s.to_string())
+}
+fn resv(h: &str) -> Option<f64> { u128::from_str_radix(h.get(32..64)?, 16).ok().map(|v| v as f64) } // uint112 fits in the low 128 bits
+fn pool_price_kas(a: &ureq::Agent, c: &PoolCfg) -> Option<f64> {
+    let h = eth_call(a, c.pool, "0x0902f1ac")?; let h = h.trim_start_matches("0x");
+    if h.len() < 128 { return None; }
+    let (r0, r1) = (resv(&h[0..64])?, resv(&h[64..128])?);
+    if r0 <= 0.0 || r1 <= 0.0 { return None; }
+    Some(if c.wkas_is_token0 { r0 / r1 } else { r1 / r0 }) // both 18-dec → ratio is the WKAS price
+}
+fn kas_usd(lp: &Live) -> f64 {
+    match lp.lock().unwrap().get("KAS/USD") {
+        Some(m) => { let mut v: Vec<f64> = m.values().map(|(p, _)| *p).collect(); v.sort_by(|a, b| a.partial_cmp(b).unwrap()); if v.is_empty() { 0.0 } else { v[v.len() / 2] } }
+        None => 0.0,
+    }
+}
+
 fn slow_thread(lp: Live) {
     loop {
         let a = agent();
@@ -140,6 +168,10 @@ fn slow_thread(lp: Live) {
             if let Some(s) = f.gate   { if let Some(p) = gate(&a, s)   { set_price(&lp, f.pair, "Gate.io", p); } }
             if let Some(s) = f.mexc   { if let Some(p) = mexc(&a, s)   { set_price(&lp, f.pair, "MEXC", p); } }
         }
+        // OUR own on-chain source: read the Kasplex DEX pool directly
+        let ku = kas_usd(&lp);
+        if ku > 0.0 { for c in pools() { if let Some(px) = pool_price_kas(&a, &c) { set_price(&lp, c.token, "Kasplex-DEX", px * ku); } } }
+        // aggregators (cross-check; being phased out for the direct read)
         let cg = coingecko(&["nacho-the-kat", "kaspy"]);
         if let Some(p) = cg.get("nacho-the-kat") { set_price(&lp, "NACHO/USD", "CoinGecko", *p); }
         if let Some(p) = cg.get("kaspy") { set_price(&lp, "KASPY/USD", "CoinGecko", *p); }
