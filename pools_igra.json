@@ -1,0 +1,154 @@
+[
+ {
+  "symbol": "ZEAL",
+  "pair": "0xa18a9d28a5ef040d8dbccd61a2ca7fc8d5306d95",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 1982014.9
+ },
+ {
+  "symbol": "IGRA",
+  "pair": "0xe3ec97320ab56f7d4401ba3a5e99ae1a118c25b8",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 1756933.9
+ },
+ {
+  "symbol": "NACHO",
+  "pair": "0x2dfdc939c60da7906e7117a3d6dc6bd6bcd881c9",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 1042524.2
+ },
+ {
+  "symbol": "USDC",
+  "pair": "0x7826f5421c324590b1c21d22231c48ad059cbe45",
+  "wkas_is_token0": true,
+  "dec": 6,
+  "chain": "igra",
+  "wkas_liq": 999033.1
+ },
+ {
+  "symbol": "USDT",
+  "pair": "0xc281cb25715ea8e46c9b916f22ae7c0f55b014d7",
+  "wkas_is_token0": true,
+  "dec": 6,
+  "chain": "igra",
+  "wkas_liq": 615330.6
+ },
+ {
+  "symbol": "cbBTC",
+  "pair": "0xbc7d375e80ac319b314f2233196b3b9c99a3a795",
+  "wkas_is_token0": true,
+  "dec": 8,
+  "chain": "igra",
+  "wkas_liq": 325983.7
+ },
+ {
+  "symbol": "WETH",
+  "pair": "0x5e2a0178bab2b457570c5503d53179539c0b1a94",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 285273.6
+ },
+ {
+  "symbol": "WOLFY",
+  "pair": "0x3f53e7af2fb97d96f37c27068f85aa0b0d3d5d74",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 130203.4
+ },
+ {
+  "symbol": "CEO",
+  "pair": "0xa022cbf27ac4843d5288f66606292a37c0f73142",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 38383.4
+ },
+ {
+  "symbol": "KASPY",
+  "pair": "0x4e7346a2afcda67197205e0bc5a0797c4af89f73",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 27303.3
+ },
+ {
+  "symbol": "KASLOT",
+  "pair": "0x893f6b7ca4267d6dc670b8c9a197ccff043510df",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 16851.3
+ },
+ {
+  "symbol": "KPAW",
+  "pair": "0xdb710d09cf437b7bd1e6f29527c009f6541c188a",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 7708.6
+ },
+ {
+  "symbol": "KSKD",
+  "pair": "0xb30099964080a9b6724a94782d156cc22280389e",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 5825.0
+ },
+ {
+  "symbol": "FLUX",
+  "pair": "0x6e11c03a131596ac112912df0d6fcfa1db264dea",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 1016.3
+ },
+ {
+  "symbol": "wstETH",
+  "pair": "0x690a59fb9e82d5c78841236a29d51d3cd0c4c7e7",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 936.9
+ },
+ {
+  "symbol": "MTGOX",
+  "pair": "0x767173ee57ddf8aabdcf70462152eb2700691ec1",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 649.8
+ },
+ {
+  "symbol": "KREX",
+  "pair": "0x22050ef8de050d1aa7591c3618b124a0e02c06a1",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 190.4
+ },
+ {
+  "symbol": "KVS",
+  "pair": "0xeca789bb409e7b3f86b7c31e2e4ba25e376cce42",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 107.7
+ },
+ {
+  "symbol": "GTEST",
+  "pair": "0x1b22efedd181b962a50863bafab0a667ed587840",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "wkas_liq": 57.6
+ }
+]

@@ -24,7 +24,7 @@ const HISTORY: usize = 120;
 const N_NODES: usize = 5;
 const THRESHOLD: usize = 3;
 const SERVE_MS: u64 = 400;    // re-sign + serve cadence
-const STALE_MS: u64 = 15_000; // drop a source's price if older than this
+const STALE_MS: u64 = 30_000; // drop a source's price if older than this (KRC-20 pools refresh every few s)
 const SLOW_EVERY: u64 = 5;    // REST/KRC-20 refresh (seconds)
 
 fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() }
@@ -39,25 +39,32 @@ fn set_price(lp: &Live, pair: &str, ex: &'static str, price: f64) {
 // ---------- feeds ----------
 // KRC-20 pools discovered on-chain from the Zealous factory (pools.json), each
 // {symbol, pool, wkas_is_token0, dec}. Loaded once. No third-party in the path.
+// {symbol, pool, wkas_is_token0, dec, chain}. A token can have a pool on BOTH
+// chains (Kasplex + Igra) — each is a separate on-chain source; build() medians.
 #[derive(Clone)]
-struct Pool { symbol: String, pool: String, wkas_is_token0: bool, dec: u32 }
+struct Pool { symbol: String, pool: String, wkas_is_token0: bool, dec: u32, chain: String }
 static POOLS: std::sync::OnceLock<Vec<Pool>> = std::sync::OnceLock::new();
 fn load_pools() -> &'static Vec<Pool> {
     POOLS.get_or_init(|| serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string("pools.json").unwrap_or_default()).ok()
-        .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|p| Some(Pool {
-            symbol: p["symbol"].as_str()?.to_string(), pool: p["pair"].as_str()?.to_string(),
-            wkas_is_token0: p["wkas_is_token0"].as_bool()?, dec: p["dec"].as_u64()? as u32,
-        })).collect())).unwrap_or_default())
+        .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|p| {
+            let symbol = p["symbol"].as_str()?.to_string();
+            // a KRC-20 meme token named KAS/BTC/ETH must NOT collide with the real major feeds
+            if matches!(symbol.to_uppercase().as_str(), "KAS" | "BTC" | "ETH") { return None; }
+            Some(Pool { symbol, pool: p["pair"].as_str()?.to_string(),
+                wkas_is_token0: p["wkas_is_token0"].as_bool()?, dec: p["dec"].as_u64()? as u32,
+                chain: p["chain"].as_str().unwrap_or("kasplex").to_string() })
+        }).collect())).unwrap_or_default())
 }
 #[derive(Clone)]
-struct FeedCfg { pair: String, kind: &'static str, kucoin: Option<&'static str>, gate: Option<&'static str>, mexc: Option<&'static str>, pool: Option<Pool> }
+struct FeedCfg { pair: String, kind: &'static str, kucoin: Option<&'static str>, gate: Option<&'static str>, mexc: Option<&'static str> }
 fn feeds() -> Vec<FeedCfg> {
     let mut v = vec![
-        FeedCfg { pair: "KAS/USD".into(), kind: "major", kucoin: Some("KAS-USDT"), gate: Some("KAS_USDT"), mexc: Some("KASUSDT"), pool: None },
-        FeedCfg { pair: "BTC/USD".into(), kind: "major", kucoin: Some("BTC-USDT"), gate: Some("BTC_USDT"), mexc: Some("BTCUSDT"), pool: None },
-        FeedCfg { pair: "ETH/USD".into(), kind: "major", kucoin: Some("ETH-USDT"), gate: Some("ETH_USDT"), mexc: Some("ETHUSDT"), pool: None },
+        FeedCfg { pair: "KAS/USD".into(), kind: "major", kucoin: Some("KAS-USDT"), gate: Some("KAS_USDT"), mexc: Some("KASUSDT") },
+        FeedCfg { pair: "BTC/USD".into(), kind: "major", kucoin: Some("BTC-USDT"), gate: Some("BTC_USDT"), mexc: Some("BTCUSDT") },
+        FeedCfg { pair: "ETH/USD".into(), kind: "major", kucoin: Some("ETH-USDT"), gate: Some("ETH_USDT"), mexc: Some("ETHUSDT") },
     ];
-    for p in load_pools() { v.push(FeedCfg { pair: format!("{}/USD", p.symbol), kind: "krc20", kucoin: None, gate: None, mexc: None, pool: Some(p.clone()) }); }
+    let mut seen = std::collections::HashSet::new();
+    for p in load_pools() { if seen.insert(p.symbol.clone()) { v.push(FeedCfg { pair: format!("{}/USD", p.symbol), kind: "krc20", kucoin: None, gate: None, mexc: None }); } }
     v
 }
 
@@ -114,11 +121,16 @@ fn mexc(a: &ureq::Agent, s: &str) -> Option<f64> { pf(&get(a, &format!("https://
 // getReserves() CROSS-CHECKED across RPCs (set KASPLEX_RPCS=https://your-node,…
 // to include your own node — then no single RPC is trusted). Windowed median
 // (TWAP) + a liquidity gate defend against flash-loan spot manipulation.
-fn kasplex_rpcs() -> Vec<String> {
-    std::env::var("KASPLEX_RPCS").ok().filter(|s| !s.is_empty())
+fn chain_rpcs(chain: &str) -> Vec<String> {
+    let (env, default) = match chain {
+        "igra" => ("IGRA_RPCS", "https://rpc.igralabs.com:8545"),
+        _ => ("KASPLEX_RPCS", "https://evmrpc.kasplex.org"),
+    };
+    std::env::var(env).ok().filter(|s| !s.is_empty())
         .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
-        .unwrap_or_else(|| vec!["https://evmrpc.kasplex.org".to_string()])
+        .unwrap_or_else(|| vec![default.to_string()])
 }
+fn dex_source(chain: &str) -> &'static str { match chain { "igra" => "Igra-DEX", _ => "Kasplex-DEX" } }
 fn eth_call_cross(rpcs: &[String], to: &str, data: &str) -> Option<String> {
     let a = agent();
     let body = format!(r#"{{"jsonrpc":"2.0","method":"eth_call","params":[{{"to":"{to}","data":"{data}"}},"latest"],"id":1}}"#);
@@ -154,8 +166,7 @@ const MIN_LIQ_WKAS: f64 = 1000.0; // below this a KRC-20 feed is flagged "thin" 
 const TWAP_N: usize = 12;         // ~60s window at SLOW_EVERY=5s — kills single-block flash-loan spikes
 
 fn slow_thread(lp: Live) {
-    let rpcs = kasplex_rpcs();
-    eprintln!("kasplex RPCs ({}): {}", rpcs.len(), rpcs.join(", "));
+    for c in ["kasplex", "igra"] { let r = chain_rpcs(c); eprintln!("{c} RPCs ({}): {}", r.len(), r.join(", ")); }
     let mut win: HashMap<String, Vec<f64>> = HashMap::new();
     loop {
         let a = agent();
@@ -164,16 +175,23 @@ fn slow_thread(lp: Live) {
             if let Some(s) = f.gate   { if let Some(p) = gate(&a, s)   { set_price(&lp, &f.pair, "Gate.io", p); } }
             if let Some(s) = f.mexc   { if let Some(p) = mexc(&a, s)   { set_price(&lp, &f.pair, "MEXC", p); } }
         }
-        // KRC-20: cross-checked pool read → windowed median (TWAP) → publish (never a raw spot)
+        // KRC-20: read each pool on ITS chain (cross-checked) → windowed median (TWAP) → publish.
+        // A token on both chains gets two on-chain sources (Kasplex-DEX + Igra-DEX) → build() medians.
         let ku = kas_usd(&lp);
         if ku > 0.0 {
-            for f in feeds() {
-                if let Some(p) = &f.pool {
-                    if let Some((px_kas, liq)) = pool_read(&rpcs, p) {
-                        let w = win.entry(f.pair.clone()).or_default();
+            // read pools in parallel (bounded concurrency) so the whole set refreshes in seconds, not a minute
+            for chunk in load_pools().chunks(12) {
+                let reads: Vec<(String, &str, Option<(f64, f64)>)> = std::thread::scope(|s| {
+                    chunk.iter().map(|p| s.spawn(move || (format!("{}/USD", p.symbol), p.chain.as_str(), pool_read(&chain_rpcs(&p.chain), p))))
+                        .collect::<Vec<_>>().into_iter().map(|h| h.join().unwrap()).collect()
+                });
+                for (pair, chain, res) in reads {
+                    if let Some((px_kas, liq)) = res {
+                        let w = win.entry(format!("{pair}|{chain}")).or_default(); // window per (pair, chain)
                         w.push(px_kas * ku); if w.len() > TWAP_N { let d = w.len() - TWAP_N; w.drain(0..d); }
-                        set_price(&lp, &f.pair, "Kasplex-DEX", median(w)); // windowed median, not the manipulable spot
-                        liq_map().lock().unwrap().insert(f.pair.clone(), liq);
+                        set_price(&lp, &pair, dex_source(chain), median(w));
+                        let mut lm = liq_map().lock().unwrap();
+                        let e = lm.entry(pair).or_insert(0.0); if liq > *e { *e = liq; } // max liq across venues
                     }
                 }
             }
