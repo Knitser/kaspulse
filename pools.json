@@ -1,0 +1,82 @@
+[
+ {
+  "symbol": "BMT",
+  "pair": "0x119968f5d4345a0dc34d86e95eafbb0d46a57295",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 561253.3,
+  "px_wkas": 0.00019699029775884815
+ },
+ {
+  "symbol": "AXEL",
+  "pair": "0x49198539d255d9ce48ad82da22dd3252f1b15212",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 108356.3,
+  "px_wkas": 7.432123723449586e-06
+ },
+ {
+  "symbol": "SHITE",
+  "pair": "0x7f11751fbd53fc25d26354c18fc2d6986dd92bb6",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 83719.5,
+  "px_wkas": 4.876025278073954e-06
+ },
+ {
+  "symbol": "KREP",
+  "pair": "0x6021ab661414eeb515a19e29ab27c8e777a72910",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 67987.2,
+  "px_wkas": 0.000415002755032324
+ },
+ {
+  "symbol": "LOYAL",
+  "pair": "0xe16dedbb1b1a2c969ab1977065373d3a43d246bd",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 49738.3,
+  "px_wkas": 0.00019518421245041256
+ },
+ {
+  "symbol": "KAST",
+  "pair": "0x36814a7b05a4a7a8e6bc17c39eebc4d5c68aaa6e",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 28027.7,
+  "px_wkas": 4.740991406263689e-05
+ },
+ {
+  "symbol": "DOENER",
+  "pair": "0xfa912718406851af85f981f73c5ccb6e0d3cf7fa",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 26360.6,
+  "px_wkas": 4.4854402912727475e-05
+ },
+ {
+  "symbol": "LION",
+  "pair": "0x6e52e476999771f3ce03b5f2589a418eccffbdc7",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 24469.4,
+  "px_wkas": 0.0040540382499739845
+ },
+ {
+  "symbol": "KOOK",
+  "pair": "0xaca98458be5e82fda3893fe76748d05241e441e0",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 23546.1,
+  "px_wkas": 3.583603380974911e-05
+ },
+ {
+  "symbol": "SOMPG",
+  "pair": "0xe851fe7939723ba909f138310bbc3d915a512286",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 21567.5,
+  "px_wkas": 1.5724333248300117e-05
+ }
+]
