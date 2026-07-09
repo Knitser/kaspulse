@@ -32,5 +32,10 @@ path = "src/main.rs"
 name = "verify"
 path = "src/verify.rs"
 
+[[bin]]
+name = "onchain"
+path = "src/onchain.rs"
+required-features = ["onchain"]
+
 [profile.release]
 opt-level = 2
