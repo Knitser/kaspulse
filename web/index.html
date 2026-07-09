@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>kaspulse — real-time price oracle for Kaspa</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230a0e14'/%3E%3Cpath d='M8 34h12l6-16 8 30 6-20 4 10h12' fill='none' stroke='%2349eacb' stroke-width='4' stroke-linjoin='round' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="aura"></div>
+  <header class="nav">
+    <a class="brand" href="#">
+      <svg class="sigil" viewBox="0 0 64 64" width="26" height="26" aria-hidden="true"><path d="M6 34h11l6-17 8 32 6-22 4 11h13" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/></svg>
+      kaspulse
+    </a>
+    <span class="nav-tag">real-time price oracle · Kaspa L1</span>
+  </header>
+
+  <section class="hero">
+    <div class="eyebrow">real-time price feeds · Kaspa L1</div>
+    <h1>Live prices,<br><span class="grad">signed &amp; on-chain.</span></h1>
+    <p class="lede">Kaspa's ~100ms blocks let a price land and finalize on-chain faster than almost any other L1 — the fresh, verifiable feed DeFi needs. Every price is a median of independent exchanges, signed by a threshold of nodes, and checkable on-chain. No single venue, no single operator, can move it.</p>
+  </section>
+
+  <section class="board">
+    <!-- live price -->
+    <div class="card price-card">
+      <div class="pc-head"><span class="pair" id="pair">KAS/USD</span><span class="live" id="live">● LIVE</span></div>
+      <div class="price" id="price">—</div>
+      <div class="pc-sub"><span id="updated">connecting…</span> · <span id="round"></span></div>
+      <svg class="spark" id="spark" viewBox="0 0 600 120" preserveAspectRatio="none"></svg>
+      <div class="next"><span class="next-bar" id="nextbar"></span></div>
+    </div>
+
+    <!-- aggregation -->
+    <div class="card">
+      <div class="card-h">Aggregation <span class="dim">— median of independent venues</span></div>
+      <div id="sources" class="sources"></div>
+      <div class="agg-foot">
+        <div class="agg-stat"><span class="as-n" id="median">—</span><span class="as-l">median</span></div>
+        <div class="agg-stat"><span class="as-n" id="spread">—</span><span class="as-l">spread</span></div>
+        <div class="agg-stat"><span class="as-n" id="nsrc">—</span><span class="as-l">sources</span></div>
+      </div>
+    </div>
+
+    <!-- signature / trust -->
+    <div class="card">
+      <div class="card-h">Signed attestation <span class="dim">— trustless, verify it yourself</span></div>
+      <div class="sig-grid">
+        <div class="sig-row"><span class="sig-k">signers</span><span class="sig-v" id="signers">—</span></div>
+        <div class="sig-row"><span class="sig-k">threshold</span><span class="sig-v" id="threshold">—</span></div>
+        <div class="sig-row"><span class="sig-k">message</span><span class="sig-v mono" id="message">—</span></div>
+        <div class="sig-row"><span class="sig-k">signature</span><span class="sig-v mono" id="signature">—</span></div>
+      </div>
+      <div class="onchain" id="onchain">
+        <span class="oc-dot"></span><span id="oc-text">on-chain publishing — see the price coin on Kaspa TN10</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="consume">
+    <h2 class="section-h">Consume the feed</h2>
+    <div class="consume-grid">
+      <div class="con-card">
+        <div class="con-h">Off-chain — the API</div>
+        <pre class="code"><span class="c-c"># latest signed price</span>
+curl <span class="c-s">http://localhost:8080/api/feed</span>
+
+<span class="c-c"># → { price, median, sources[], signer,</span>
+<span class="c-c">#     signature, message, ... }</span></pre>
+      </div>
+      <div class="con-card">
+        <div class="con-h">On-chain — a covenant reads it</div>
+        <pre class="code"><span class="c-c">// a "price coin" carries the signed price;</span>
+<span class="c-c">// a consumer covenant unlocks only when</span>
+<span class="c-c">// the oracle's signature checks out:</span>
+[oraclePubkey] <span class="c-k">OpCheckSig</span>
+<span class="c-c">// → price-gated payment, options, liquidation</span></pre>
+      </div>
+    </div>
+  </section>
+
+  <footer class="foot"><span>kaspulse</span> · real-time price oracle for Kaspa · <span class="dim">median of live exchange feeds, signed &amp; verifiable</span></footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
