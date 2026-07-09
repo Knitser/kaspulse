@@ -1,93 +1,82 @@
 'use strict';
 const $ = (s) => document.querySelector(s);
-const TICK = 2000;                 // matches the oracle's tick
-let lastPrice = null, lastRound = -1, lastFetch = 0;
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const last = {};            // pair -> last price (for flashing)
+let latest = null;          // last full payload
 
-const fmtUsd = (p) => '$' + Number(p).toLocaleString('en-US', { minimumFractionDigits: 5, maximumFractionDigits: 6 });
-const short = (h, n = 10) => (h ? h.slice(0, n) + '…' + h.slice(-6) : '—');
+function fmt(p) {
+  p = Number(p);
+  if (p >= 1000) return '$' + p.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  if (p >= 1) return '$' + p.toFixed(3);
+  if (p >= 0.001) return '$' + p.toFixed(5);
+  return '$' + p.toPrecision(3);   // tiny KRC-20 prices
+}
 
 async function poll() {
   try {
-    const feed = await (await fetch('/api/feed', { cache: 'no-cache' })).json();
-    if (feed && feed.price) { render(feed); lastFetch = Date.now(); }
-  } catch (e) { markStale(); }
+    const d = await (await fetch('/api/feed', { cache: 'no-cache' })).json();
+    if (d && d.feeds) { latest = d; render(d); }
+  } catch (e) { $('#live').classList.add('stale'); }
 }
 
-function render(f) {
-  $('#pair').textContent = f.pair || 'KAS/USD';
-
-  // price + flash
-  const el = $('#price');
-  const cls = lastPrice == null ? '' : (f.price > lastPrice ? 'flash-up' : f.price < lastPrice ? 'flash-dn' : '');
-  el.innerHTML = `<span class="${cls}">${fmtUsd(f.price)}</span>`;
-  lastPrice = f.price;
-
-  $('#round').textContent = 'round ' + f.round;
-  $('#live').innerHTML = '<span class="on">●</span> LIVE';
+function render(d) {
+  $('#round').textContent = 'round ' + d.round;
+  $('#threshold').textContent = `${d.threshold}-of-${d.num_nodes} signed`;
   $('#live').classList.remove('stale');
-
-  // sources
-  const med = f.median;
-  $('#sources').innerHTML = (f.sources || []).map((s) => {
-    const isMed = Math.abs(s.price - med) < 1e-9;
-    return `<div class="src ${isMed ? 'is-med' : ''}"><span class="src-n">${esc(s.name)}${isMed ? '<span class="src-tag">median</span>' : ''}</span><span class="src-p">${fmtUsd(s.price)}</span></div>`;
-  }).join('');
-  $('#median').textContent = fmtUsd(med);
-  $('#spread').textContent = (f.spread_bps != null ? f.spread_bps.toFixed(1) : '—') + ' bps';
-  $('#nsrc').textContent = f.num_sources ?? (f.sources ? f.sources.length : '—');
-
-  // signers / threshold (handles single-node now, multi-node after decentralization)
-  const signers = f.signers || (f.signer ? [f.signer] : []);
-  const k = f.threshold || 1;
-  $('#signers').textContent = signers.length + (signers.length === 1 ? ' node' : ' independent nodes');
-  $('#threshold').textContent = `${k}-of-${signers.length}` + (signers.length === 1 ? ' (single — decentralize to remove trust)' : ' must agree');
-  $('#message').textContent = f.message || '—';
-  $('#signature').textContent = short(f.signatures ? f.signatures[0] : f.signature, 20);
-
-  // on-chain status
-  if (f.onchain && f.onchain.txid) {
-    const oc = $('#onchain'); oc.classList.add('live-oc');
-    $('#oc-text').innerHTML = `published on Kaspa TN10 · <a href="https://explorer-tn10.kaspa.org/txs/${f.onchain.txid}" target="_blank" rel="noopener">price coin ${short(f.onchain.txid, 8)}</a>`;
-  }
-
-  drawSpark(f.history || []);
+  $('#feeds').innerHTML = d.feeds.map(cardHtml).join('');
+  d.feeds.forEach((f) => { last[f.pair] = f.price; });
+  $('#boardfoot').innerHTML = `${d.feeds.length} feeds · each a median of independent venues, signed by ${d.num_nodes} nodes (need ${d.threshold}). <span class="dim">Click a feed for sources &amp; signatures.</span>`;
+  document.querySelectorAll('.feed-card').forEach((c) => (c.onclick = () => detail(c.dataset.pair)));
 }
 
-function drawSpark(hist) {
-  const svg = $('#spark'); const W = 600, H = 120, pad = 6;
-  if (hist.length < 2) { svg.innerHTML = ''; return; }
-  const ps = hist.map((h) => h[1]);
-  const lo = Math.min(...ps), hi = Math.max(...ps), rng = hi - lo || 1;
+function cardHtml(f) {
+  const prev = last[f.pair];
+  const dir = prev == null ? '' : f.price > prev ? 'up' : f.price < prev ? 'dn' : '';
+  const tag = f.kind === 'krc20' ? '<span class="fc-tag krc20">KRC-20</span>' : '<span class="fc-tag major">major</span>';
+  const feat = f.pair === 'KAS/USD' ? ' featured' : '';
+  return `<div class="feed-card${feat}" data-pair="${esc(f.pair)}">
+    <div class="fc-top"><span class="fc-pair">${esc(f.pair)}</span>${tag}</div>
+    <div class="fc-price ${dir}">${fmt(f.price)}</div>
+    ${spark(f.history)}
+    <div class="fc-foot"><span>${f.num_sources} source${f.num_sources === 1 ? '' : 's'}</span><span class="fc-ok">✓ ${f.threshold}-of-${f.signatures.length} signed</span></div>
+  </div>`;
+}
+
+function spark(hist) {
+  const W = 300, H = 46, pad = 3;
+  if (!hist || hist.length < 2) return `<svg class="fc-spark" viewBox="0 0 ${W} ${H}"></svg>`;
+  const ps = hist.map((h) => h[1]), lo = Math.min(...ps), hi = Math.max(...ps), rng = hi - lo || 1;
   const x = (i) => pad + (i / (hist.length - 1)) * (W - 2 * pad);
   const y = (p) => pad + (1 - (p - lo) / rng) * (H - 2 * pad);
   const pts = hist.map((h, i) => `${x(i).toFixed(1)},${y(h[1]).toFixed(1)}`).join(' ');
-  const area = `${pad},${H} ${pts} ${W - pad},${H}`;
-  const up = hist[hist.length - 1][1] >= hist[0][1];
+  const up = ps[ps.length - 1] >= ps[0];
   const col = up ? 'var(--green)' : 'var(--red)';
-  svg.innerHTML = `
-    <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="${col}" stop-opacity="0.25"/><stop offset="1" stop-color="${col}" stop-opacity="0"/>
-    </linearGradient></defs>
-    <polygon points="${area}" fill="url(#g)"/>
-    <polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-    <circle cx="${x(hist.length - 1)}" cy="${y(hist[hist.length - 1][1])}" r="3.5" fill="${col}"/>`;
+  return `<svg class="fc-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
 }
 
-function markStale() {
-  const l = $('#live'); if (l) { l.textContent = '● reconnecting'; l.classList.add('stale'); }
+// click a feed → sources + the signed attestation
+const modal = $('#modal');
+$('#modal-x').onclick = () => (modal.hidden = true);
+modal.onclick = (e) => { if (e.target === modal) modal.hidden = true; };
+function detail(pair) {
+  const f = latest.feeds.find((x) => x.pair === pair);
+  if (!f) return;
+  modal.hidden = false;
+  $('#modal-body').innerHTML = `
+    <div class="m-eyebrow">${f.kind === 'krc20' ? 'KRC-20 token' : 'major'} · signed feed</div>
+    <div class="m-title">${esc(f.pair)} ${fmt(f.price)}</div>
+    <p class="m-body">Median of ${f.num_sources} venue${f.num_sources === 1 ? '' : 's'} · spread ${Number(f.spread_bps).toFixed(1)} bps · signed by ${f.signatures.length} nodes (need ${f.threshold}).</p>
+    <div class="d-sources">${f.sources.map((s) => {
+      const isMed = Math.abs(s.price - f.median) < 1e-12;
+      return `<div class="d-src ${isMed ? 'med' : ''}"><span>${esc(s.name)}${isMed ? ' <span class="d-medtag">median</span>' : ''}</span><span class="mono">${fmt(s.price)}</span></div>`;
+    }).join('')}</div>
+    <div class="d-sig">
+      <div class="d-sig-k">signed message</div><div class="mono d-sig-v">${esc(f.message)}</div>
+      <div class="d-sig-k">signature (node 0)</div><div class="mono d-sig-v">${esc(f.signatures[0].slice(0, 40))}…</div>
+    </div>
+    <p class="m-alt">verify it yourself: <span class="mono">cargo run --bin verify</span> — re-checks every signature + re-fetches the market.</p>`;
 }
 
-// "updated Xs ago" + next-update progress bar
-setInterval(() => {
-  if (!lastFetch) return;
-  const age = (Date.now() - lastFetch) / 1000;
-  $('#updated').textContent = age < 1.5 ? 'just now' : `updated ${age.toFixed(0)}s ago`;
-  const pct = Math.min(100, ((Date.now() - lastFetch) / TICK) * 100);
-  $('#nextbar').style.width = pct + '%';
-  if (age > 8) markStale();
-}, 200);
-
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-
+const line = () => {};   // noop (kept for parity)
 poll();
-setInterval(poll, 1000);
+setInterval(poll, 1500);

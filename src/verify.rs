@@ -41,48 +41,56 @@ fn median(xs: &[f64]) -> f64 {
     let n = v.len(); if n == 0 { 0.0 } else if n % 2 == 1 { v[n/2] } else { (v[n/2-1]+v[n/2])/2.0 }
 }
 
-fn main() {
-    let url = std::env::args().nth(1).unwrap_or_else(|| "http://127.0.0.1:8080/api/feed".into());
-    println!("kaspulse verify — pulling the feed from {url}\n");
-    let feed = match get(&agent(), &url) { Some(v) => v, None => { eprintln!("could not reach the oracle — is it running? (cargo run --bin oracle)"); std::process::exit(1); } };
-
-    let msg = feed["message"].as_str().unwrap_or("");
-    let threshold = feed["threshold"].as_u64().unwrap_or(0);
-    let signers = feed["signers"].as_array().cloned().unwrap_or_default();
-    let sigs = feed["signatures"].as_array().cloned().unwrap_or_default();
-    println!("message signed:  {msg}");
-
-    // (1) verify each node's Schnorr signature over blake2b(message)
+fn verify_sigs(f: &serde_json::Value, threshold: u64) -> (usize, usize) {
+    let msg = f["message"].as_str().unwrap_or("");
+    let signers = f["signers"].as_array().cloned().unwrap_or_default();
+    let sigs = f["signatures"].as_array().cloned().unwrap_or_default();
     let h = blake2b_simd::Params::new().hash_length(32).hash(msg.as_bytes());
     let m = Message::from_digest_slice(h.as_bytes()).unwrap();
     let mut valid = 0;
-    println!("\nsignatures ({} nodes, need {threshold}):", signers.len());
     for (pk_hex, sig_hex) in signers.iter().zip(sigs.iter()) {
         let ok = (|| {
             let pk = XOnlyPublicKey::from_slice(&hex::decode(pk_hex.as_str()?).ok()?).ok()?;
             let sig = schnorr::Signature::from_slice(&hex::decode(sig_hex.as_str()?).ok()?).ok()?;
             Some(SECP256K1.verify_schnorr(&sig, &m, &pk).is_ok())
         })().unwrap_or(false);
-        let s = pk_hex.as_str().unwrap_or("");
-        println!("  {} node {}…", if ok { "✓" } else { "✗" }, &s[..12.min(s.len())]);
         if ok { valid += 1; }
     }
-    let sig_ok = valid as u64 >= threshold && threshold > 0;
-    println!("  → {valid}/{} valid · threshold {threshold} {}", signers.len(), if sig_ok { "MET ✓" } else { "NOT met ✗" });
+    let _ = threshold;
+    (valid, signers.len())
+}
 
-    // (2) recompute the median from the exchanges, independently
-    println!("\nindependent price check (re-fetching exchanges myself):");
+fn main() {
+    let url = std::env::args().nth(1).unwrap_or_else(|| "http://127.0.0.1:8080/api/feed".into());
+    println!("kaspulse verify — pulling all feeds from {url}\n");
+    let root = match get(&agent(), &url) { Some(v) => v, None => { eprintln!("could not reach the oracle — is it running? (cargo run --bin oracle)"); std::process::exit(1); } };
+    let threshold = root["threshold"].as_u64().unwrap_or(0);
+    let feeds = root["feeds"].as_array().cloned().unwrap_or_default();
+    if feeds.is_empty() { eprintln!("no feeds in the response"); std::process::exit(1); }
+
+    // (1) verify every signature on every feed
+    println!("signatures (need {threshold} of each feed's nodes):");
+    let mut all_sig_ok = true;
+    for f in &feeds {
+        let pair = f["pair"].as_str().unwrap_or("?");
+        let (valid, n) = verify_sigs(f, threshold);
+        let ok = valid as u64 >= threshold && threshold > 0;
+        println!("  {} {:<10} {valid}/{n} valid{}", if ok { "✓" } else { "✗" }, pair, if ok { "" } else { "  ← FAIL" });
+        if !ok { all_sig_ok = false; }
+    }
+
+    // (2) independent price sanity-check on KAS/USD (re-fetch the market myself)
+    println!("\nindependent KAS/USD check (re-fetching exchanges myself):");
     let src = fetch_sources();
     for (n, p) in &src { println!("  {n}: ${p:.6}"); }
     let mine = median(&src.iter().map(|(_, p)| *p).collect::<Vec<_>>());
-    let theirs = feed["median"].as_f64().unwrap_or(0.0);
+    let theirs = feeds.iter().find(|f| f["pair"].as_str() == Some("KAS/USD")).and_then(|f| f["median"].as_f64()).unwrap_or(0.0);
     let drift = if theirs > 0.0 { ((mine - theirs).abs() / theirs) * 100.0 } else { 100.0 };
-    let price_ok = drift < 1.0; // within 1% (prices move between fetches)
-    println!("  my median ${mine:.6}  vs  feed ${theirs:.6}  ({drift:.2}% drift) {}",
-        if price_ok { "✓" } else { "⚠ (moved / off)" });
+    let price_ok = drift < 1.0;
+    println!("  my median ${mine:.6}  vs  feed ${theirs:.6}  ({drift:.2}% drift) {}", if price_ok { "✓" } else { "⚠ (moved / off)" });
 
-    println!("\n{}", if sig_ok && price_ok {
-        "VERDICT: honest feed — signed by the threshold AND the price matches the market. No trust required."
+    println!("\n{}", if all_sig_ok && price_ok {
+        "VERDICT: honest — every feed signed by the threshold, and KAS matches the market. No trust required."
     } else {
         "VERDICT: something's off — see above."
     });

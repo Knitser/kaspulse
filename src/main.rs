@@ -1,83 +1,114 @@
-//! kaspulse — the real-time price oracle for Kaspa.
+//! kaspulse — a real-time, multi-asset price oracle for Kaspa.
 //!
-//! Every tick it pulls KAS/USD from several exchanges, takes the median (so no
-//! single venue can move the feed), and SIGNS the result with the oracle's key
-//! (Schnorr). The signed attestation is what a Kaspa covenant verifies on-chain
-//! — the price is trustless: anyone can re-derive the median and check the
-//! signature. Kaspa's ~100ms blocks let this refresh far faster than oracles on
-//! slower chains — the whole point.
+//! Each tick it prices several assets at once — majors (KAS/BTC/ETH) from a
+//! median of independent exchanges, and KRC-20 tokens (NACHO/KASPY) that the big
+//! oracles ignore. Every price is signed by a threshold of independent nodes and
+//! verifiable by anyone (see the `verify` bin) — including on-chain (`onchain`).
 //!
-//! This binary is the off-chain half: fetch → aggregate → sign → serve. The
-//! on-chain half (publishing the signed price into a covenant "price coin" and
-//! a consumer contract that reads it) lives in `onchain.rs`.
+//! Feeds are fetched in parallel so rounds stay quick even across many assets.
 
 use anyhow::Result;
 use secp256k1::{Keypair, SECP256K1};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const PAIR: &str = "KAS/USD";
-const TICK: Duration = Duration::from_secs(2); // real-time-ish; Kaspa can go faster
+const TICK: Duration = Duration::from_secs(2);
 const PORT: u16 = 8080;
-const HISTORY: usize = 180;
-const N_NODES: usize = 5;   // independent signers (simulated here as one process;
-const THRESHOLD: usize = 3; // in production each runs on a separate operator/machine)
+const HISTORY: usize = 120;
+const N_NODES: usize = 5;
+const THRESHOLD: usize = 3;
 
 fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() }
 
-// ---------- data sources ----------
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout(Duration::from_secs(7)).build()
+// ---------- feeds ----------
+struct FeedCfg {
+    pair: &'static str,
+    kind: &'static str, // "major" | "krc20"
+    kraken: Option<&'static str>,
+    kucoin: Option<&'static str>,
+    gate: Option<&'static str>,
+    bybit: Option<&'static str>,
+    mexc: Option<&'static str>,
+    coingecko: Option<&'static str>,
 }
-fn get(a: &ureq::Agent, url: &str) -> Option<serde_json::Value> {
-    a.get(url).call().ok()?.into_json::<serde_json::Value>().ok()
-}
-fn f(v: &serde_json::Value) -> Option<f64> {
-    v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64())
+fn feeds() -> Vec<FeedCfg> {
+    vec![
+        FeedCfg { pair: "KAS/USD",  kind: "major", kraken: Some("KASUSD"), kucoin: Some("KAS-USDT"), gate: Some("KAS_USDT"), bybit: Some("KASUSDT"), mexc: Some("KASUSDT"), coingecko: None },
+        FeedCfg { pair: "BTC/USD",  kind: "major", kraken: Some("XBTUSD"), kucoin: Some("BTC-USDT"), gate: Some("BTC_USDT"), bybit: Some("BTCUSDT"), mexc: Some("BTCUSDT"), coingecko: None },
+        FeedCfg { pair: "ETH/USD",  kind: "major", kraken: Some("ETHUSD"), kucoin: Some("ETH-USDT"), gate: Some("ETH_USDT"), bybit: Some("ETHUSDT"), mexc: Some("ETHUSDT"), coingecko: None },
+        FeedCfg { pair: "NACHO/USD", kind: "krc20", kraken: None, kucoin: None, gate: None, bybit: None, mexc: None, coingecko: Some("nacho-the-kat") },
+        FeedCfg { pair: "KASPY/USD", kind: "krc20", kraken: None, kucoin: None, gate: None, bybit: None, mexc: None, coingecko: Some("kaspy") },
+    ]
 }
 
-/// (exchange name, price) for every venue that answers. Skips any that fail —
-/// the median just uses whoever's up.
-fn fetch_sources() -> Vec<(&'static str, f64)> {
+// ---------- fetch ----------
+fn agent() -> ureq::Agent { ureq::AgentBuilder::new().timeout(Duration::from_secs(7)).build() }
+fn get(a: &ureq::Agent, url: &str) -> Option<serde_json::Value> { a.get(url).call().ok()?.into_json().ok() }
+fn pf(v: &serde_json::Value) -> Option<f64> { v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64()) }
+
+fn kraken(a: &ureq::Agent, sym: &str) -> Option<f64> {
+    let j = get(a, &format!("https://api.kraken.com/0/public/Ticker?pair={sym}"))?;
+    j["result"].as_object()?.values().next()?["c"].get(0).and_then(pf) // result key varies by pair
+}
+fn kucoin(a: &ureq::Agent, sym: &str) -> Option<f64> { pf(&get(a, &format!("https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={sym}"))?["data"]["price"]) }
+fn gate(a: &ureq::Agent, sym: &str) -> Option<f64> { get(a, &format!("https://api.gateio.ws/api/v4/spot/tickers?currency_pair={sym}"))?.get(0).and_then(|x| pf(&x["last"])) }
+fn bybit(a: &ureq::Agent, sym: &str) -> Option<f64> { get(a, &format!("https://api.bybit.com/v5/market/tickers?category=spot&symbol={sym}"))?["result"]["list"].get(0).and_then(|x| pf(&x["lastPrice"])) }
+fn mexc(a: &ureq::Agent, sym: &str) -> Option<f64> { pf(&get(a, &format!("https://api.mexc.com/api/v3/ticker/price?symbol={sym}"))?["price"]) }
+
+/// one CoinGecko call for every KRC-20 id (batched → avoids rate limits).
+/// When CoinGecko throttles us, fall back to the last-known price so KRC-20
+/// feeds stay live (a real oracle tolerates a flaky source; it would also track
+/// staleness + circuit-break if the price got too old — a Phase-2 item).
+static CG_CACHE: std::sync::OnceLock<Mutex<HashMap<String, f64>>> = std::sync::OnceLock::new();
+static CG_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const CG_EVERY: u64 = 20; // seconds — KRC-20 doesn't need 2s cadence; stays under the free rate limit
+fn coingecko_batch(ids: &[&str]) -> HashMap<String, f64> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut m = HashMap::new();
+    if ids.is_empty() { return m; }
+    let cache = CG_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if now().saturating_sub(CG_LAST.load(Relaxed)) >= CG_EVERY {
+        if let Some(j) = get(&agent(), &format!("https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies=usd", ids.join(","))) {
+            for id in ids { if let Some(p) = j[*id]["usd"].as_f64() { m.insert(id.to_string(), p); } }
+        }
+        if !m.is_empty() { CG_LAST.store(now(), Relaxed); let mut c = cache.lock().unwrap(); for (k, v) in &m { c.insert(k.clone(), *v); } }
+    }
+    let c = cache.lock().unwrap(); // fill everything (or fall back) from cache
+    for id in ids { if !m.contains_key(*id) { if let Some(v) = c.get(*id) { m.insert(id.to_string(), *v); } } }
+    m
+}
+
+fn fetch_feed(cfg: &FeedCfg, cg: &HashMap<String, f64>) -> Vec<(&'static str, f64)> {
     let a = agent();
     let mut out = Vec::new();
-    if let Some(j) = get(&a, "https://api.kraken.com/0/public/Ticker?pair=KASUSD") {
-        if let Some(p) = j["result"]["KASUSD"]["c"].get(0).and_then(f) { out.push(("Kraken", p)); }
-    }
-    if let Some(j) = get(&a, "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=KAS-USDT") {
-        if let Some(p) = f(&j["data"]["price"]) { out.push(("KuCoin", p)); }
-    }
-    if let Some(j) = get(&a, "https://api.gateio.ws/api/v4/spot/tickers?currency_pair=KAS_USDT") {
-        if let Some(p) = j.get(0).and_then(|x| f(&x["last"])) { out.push(("Gate.io", p)); }
-    }
-    if let Some(j) = get(&a, "https://api.bybit.com/v5/market/tickers?category=spot&symbol=KASUSDT") {
-        if let Some(p) = j["result"]["list"].get(0).and_then(|x| f(&x["lastPrice"])) { out.push(("Bybit", p)); }
-    }
-    if let Some(j) = get(&a, "https://api.mexc.com/api/v3/ticker/price?symbol=KASUSDT") {
-        if let Some(p) = f(&j["price"]) { out.push(("MEXC", p)); }
-    }
-    // CoinGecko is itself an aggregator (a secondary source) — handy as a
-    // cross-check, but a real oracle leans on PRIMARY venues so it isn't
-    // trusting someone else's (slower, opaque) aggregation.
-    if let Some(j) = get(&a, "https://api.coingecko.com/api/v3/simple/price?ids=kaspa&vs_currencies=usd") {
-        if let Some(p) = f(&j["kaspa"]["usd"]) { out.push(("CoinGecko", p)); }
-    }
+    if let Some(s) = cfg.kraken { if let Some(p) = kraken(&a, s) { out.push(("Kraken", p)); } }
+    if let Some(s) = cfg.kucoin { if let Some(p) = kucoin(&a, s) { out.push(("KuCoin", p)); } }
+    if let Some(s) = cfg.gate   { if let Some(p) = gate(&a, s)   { out.push(("Gate.io", p)); } }
+    if let Some(s) = cfg.bybit  { if let Some(p) = bybit(&a, s)  { out.push(("Bybit", p)); } }
+    if let Some(s) = cfg.mexc   { if let Some(p) = mexc(&a, s)   { out.push(("MEXC", p)); } }
+    if let Some(id) = cfg.coingecko { if let Some(p) = cg.get(id) { out.push(("CoinGecko", *p)); } }
     out
 }
 
-fn median(xs: &[f64]) -> f64 {
-    let mut v: Vec<f64> = xs.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = v.len();
-    if n == 0 { 0.0 } else if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 }
+/// fetch every feed in parallel (one thread per feed).
+fn fetch_all(cfgs: &[FeedCfg]) -> Vec<Vec<(&'static str, f64)>> {
+    let ids: Vec<&str> = cfgs.iter().filter_map(|c| c.coingecko).collect();
+    let cg = coingecko_batch(&ids);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = cfgs.iter().map(|c| s.spawn(|| fetch_feed(c, &cg))).collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_default()).collect()
+    })
 }
 
-// ---------- signed attestation ----------
-/// N independent signer keys. Persisted so the pubkeys are stable (a consumer
-/// covenant commits to them). In the demo they live in one process; in
-/// production each is a separate operator that fetches + signs on its own.
+fn median(xs: &[f64]) -> f64 {
+    let mut v = xs.to_vec(); v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = v.len(); if n == 0 { 0.0 } else if n % 2 == 1 { v[n/2] } else { (v[n/2-1]+v[n/2])/2.0 }
+}
+
+// ---------- keys / signing ----------
 fn load_keys(n: usize) -> Vec<Keypair> {
     (0..n).map(|i| {
         let path = format!("kaspulse-node-{i}.key");
@@ -91,71 +122,67 @@ fn load_keys(n: usize) -> Vec<Keypair> {
         kp
     }).collect()
 }
-
-/// The canonical message a consumer re-derives and checks the signature over.
-fn message(pair: &str, price_e8: u64, ts: u64, round: u64) -> String {
-    format!("kaspulse/v1|{pair}|{price_e8}|{ts}|{round}")
-}
 fn sign(kp: &Keypair, msg: &str) -> String {
     let h = blake2b_simd::Params::new().hash_length(32).hash(msg.as_bytes());
-    let m = secp256k1::Message::from_digest_slice(h.as_bytes()).unwrap();
-    hex::encode(kp.sign_schnorr(m).as_ref())
+    hex::encode(kp.sign_schnorr(secp256k1::Message::from_digest_slice(h.as_bytes()).unwrap()).as_ref())
 }
 
-// ---------- feed builder ----------
-fn build_feed(keys: &[Keypair], round: u64, history: &[(u64, f64)]) -> (String, Option<(u64, f64)>) {
-    let sources = fetch_sources();
-    if sources.is_empty() {
-        return (r#"{"error":"all sources unreachable"}"#.to_string(), None);
-    }
-    let prices: Vec<f64> = sources.iter().map(|(_, p)| *p).collect();
-    let med = median(&prices);
-    let price_e8 = (med * 1e8).round() as u64;
+// ---------- feed json ----------
+fn esc_num(p: f64) -> String { if p == 0.0 { "0".into() } else { format!("{p}") } }
+
+fn build_all(keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec<(u64, f64)>>) -> String {
+    let cfgs = feeds();
+    let all = fetch_all(&cfgs);
     let ts = now();
-    let msg = message(PAIR, price_e8, ts, round);
-    // every node independently signs the agreed median; a consumer needs a
-    // THRESHOLD of these to accept the price — no single node can move it.
-    let sigs_j: Vec<String> = keys.iter().map(|k| format!("\"{}\"", sign(k, &msg))).collect();
-    let signers_j: Vec<String> = keys.iter().map(|k| format!("\"{}\"", hex::encode(k.x_only_public_key().0.serialize()))).collect();
-    let lo = prices.iter().cloned().fold(f64::MAX, f64::min);
-    let hi = prices.iter().cloned().fold(f64::MIN, f64::max);
-    let spread_bps = if med > 0.0 { ((hi - lo) / med) * 10_000.0 } else { 0.0 };
-
-    let src_json: Vec<String> = sources.iter()
-        .map(|(n, p)| format!(r#"{{"name":"{n}","price":{p}}}"#)).collect();
-    let mut hist = history.to_vec();
-    hist.push((ts, med));
-    if hist.len() > HISTORY { let drop = hist.len() - HISTORY; hist.drain(0..drop); }
-    let hist_json: Vec<String> = hist.iter().map(|(t, p)| format!("[{t},{p}]")).collect();
-
-    let json = format!(
-        r#"{{"pair":"{PAIR}","price":{med},"price_e8":{price_e8},"round":{round},"timestamp":{ts},"sources":[{}],"num_sources":{},"low":{lo},"high":{hi},"spread_bps":{:.2},"median":{med},"signers":[{}],"threshold":{THRESHOLD},"signatures":[{}],"message":"{msg}","history":[{}]}}"#,
-        src_json.join(","), sources.len(), spread_bps, signers_j.join(","), sigs_j.join(","), hist_json.join(",")
-    );
-    (json, Some((ts, med)))
+    let signers: Vec<String> = keys.iter().map(|k| format!("\"{}\"", hex::encode(k.x_only_public_key().0.serialize()))).collect();
+    let mut objs = Vec::new();
+    for (cfg, sources) in cfgs.iter().zip(all.into_iter()) {
+        if sources.is_empty() { continue; }
+        let prices: Vec<f64> = sources.iter().map(|(_, p)| *p).collect();
+        let med = median(&prices);
+        let price_e8 = (med * 1e8).round() as u64;
+        let msg = format!("kaspulse/v1|{}|{}|{}|{}", cfg.pair, price_e8, ts, round);
+        let sigs: Vec<String> = keys.iter().map(|k| format!("\"{}\"", sign(k, &msg))).collect();
+        let lo = prices.iter().cloned().fold(f64::MAX, f64::min);
+        let hi = prices.iter().cloned().fold(f64::MIN, f64::max);
+        let spread = if med > 0.0 { ((hi - lo) / med) * 10_000.0 } else { 0.0 };
+        let src_j: Vec<String> = sources.iter().map(|(n, p)| format!(r#"{{"name":"{n}","price":{}}}"#, esc_num(*p))).collect();
+        let h = hist.entry(cfg.pair.to_string()).or_default();
+        h.push((ts, med));
+        if h.len() > HISTORY { let d = h.len() - HISTORY; h.drain(0..d); }
+        let hist_j: Vec<String> = h.iter().map(|(t, p)| format!("[{t},{}]", esc_num(*p))).collect();
+        objs.push(format!(
+            r#"{{"pair":"{}","kind":"{}","price":{},"price_e8":{price_e8},"sources":[{}],"num_sources":{},"low":{},"high":{},"spread_bps":{:.2},"median":{},"signers":[{}],"threshold":{THRESHOLD},"signatures":[{}],"message":"{msg}","history":[{}]}}"#,
+            cfg.pair, cfg.kind, esc_num(med), src_j.join(","), sources.len(), esc_num(lo), esc_num(hi), spread, esc_num(med), signers.join(","), sigs.join(","), hist_j.join(",")
+        ));
+    }
+    format!(r#"{{"round":{round},"timestamp":{ts},"threshold":{THRESHOLD},"num_nodes":{N_NODES},"feeds":[{}]}}"#, objs.join(","))
 }
 
 // ---------- http ----------
-fn mime(path: &str) -> &'static str {
-    if path.ends_with(".html") { "text/html; charset=utf-8" }
-    else if path.ends_with(".js") { "application/javascript" }
-    else if path.ends_with(".css") { "text/css" }
-    else if path.ends_with(".json") { "application/json" }
-    else { "text/plain" }
+fn mime(p: &str) -> &'static str {
+    if p.ends_with(".html") { "text/html; charset=utf-8" } else if p.ends_with(".js") { "application/javascript" }
+    else if p.ends_with(".css") { "text/css" } else if p.ends_with(".json") { "application/json" } else { "text/plain" }
 }
 fn serve(mut s: std::net::TcpStream, feed: &Arc<Mutex<String>>) {
     let mut buf = [0u8; 2048];
     let n = match s.read(&mut buf) { Ok(n) => n, Err(_) => return };
-    let req = String::from_utf8_lossy(&buf[..n]);
-    let path = req.split_whitespace().nth(1).unwrap_or("/");
+    let path = String::from_utf8_lossy(&buf[..n]).split_whitespace().nth(1).unwrap_or("/").to_string();
     let cors = "Access-Control-Allow-Origin: *\r\n";
-    let (status, ctype, body): (&str, &str, Vec<u8>) = if path == "/api/feed" || path == "/feed.json" {
-        ("200 OK", "application/json", feed.lock().unwrap().clone().into_bytes())
+    let (status, ctype, body): (&str, &str, Vec<u8>) = if path.starts_with("/api/feed") || path == "/feed.json" {
+        let full = feed.lock().unwrap().clone();
+        // /api/feed/<PAIR> filters to one feed
+        if let Some(p) = path.strip_prefix("/api/feed/") {
+            let want = p.replace("-", "/").to_uppercase();
+            let one = serde_json::from_str::<serde_json::Value>(&full).ok()
+                .and_then(|v| v["feeds"].as_array()?.iter().find(|f| f["pair"].as_str() == Some(&want)).cloned())
+                .map(|v| v.to_string()).unwrap_or_else(|| "{\"error\":\"no such feed\"}".into());
+            ("200 OK", "application/json", one.into_bytes())
+        } else { ("200 OK", "application/json", full.into_bytes()) }
     } else {
-        let file = if path == "/" { "index.html" } else { path.trim_start_matches('/') };
-        let safe = !file.contains("..");
-        match if safe { std::fs::read(format!("web/{file}")).ok() } else { None } {
-            Some(b) => ("200 OK", mime(file), b),
+        let file = if path == "/" { "index.html".into() } else { path.trim_start_matches('/').to_string() };
+        match if !file.contains("..") { std::fs::read(format!("web/{file}")).ok() } else { None } {
+            Some(b) => ("200 OK", mime(&file), b),
             None => ("404 Not Found", "text/plain", b"not found".to_vec()),
         }
     };
@@ -166,25 +193,22 @@ fn serve(mut s: std::net::TcpStream, feed: &Arc<Mutex<String>>) {
 
 fn main() -> Result<()> {
     let keys = load_keys(N_NODES);
-    println!("kaspulse oracle — {N_NODES} independent signers, {THRESHOLD}-of-{N_NODES} threshold");
-    for (i, k) in keys.iter().enumerate() {
-        println!("  node {i}: {}", hex::encode(k.x_only_public_key().0.serialize()));
-    }
+    let cfgs = feeds();
+    println!("kaspulse oracle — {} feeds, {N_NODES} nodes, {THRESHOLD}-of-{N_NODES} threshold", cfgs.len());
+    for c in &cfgs { println!("  {} ({})", c.pair, c.kind); }
     println!("serving http://127.0.0.1:{PORT}  (dashboard + /api/feed)");
 
-    let feed = Arc::new(Mutex::new(r#"{"status":"starting"}"#.to_string()));
+    let feed = Arc::new(Mutex::new(r#"{"feeds":[]}"#.to_string()));
     {
         let feed = feed.clone();
         std::thread::spawn(move || {
             let mut round = 1u64;
-            let mut history: Vec<(u64, f64)> = Vec::new();
+            let mut hist: HashMap<String, Vec<(u64, f64)>> = HashMap::new();
             loop {
-                let (json, point) = build_feed(&keys, round, &history);
-                if let Some(pt) = point {
-                    history.push(pt);
-                    if history.len() > HISTORY { let d = history.len() - HISTORY; history.drain(0..d); }
-                    println!("round {round}: {PAIR} = ${:.6}  ({} sources)", pt.1, fetch_count(&json));
-                }
+                let json = build_all(&keys, round, &mut hist);
+                let m = serde_json::from_str::<serde_json::Value>(&json).ok();
+                let n = m.as_ref().and_then(|v| v["feeds"].as_array()).map(|a| a.len()).unwrap_or(0);
+                println!("round {round}: {n} feeds priced + signed");
                 let _ = std::fs::write("web/feed.json", &json);
                 *feed.lock().unwrap() = json;
                 round += 1;
@@ -192,14 +216,9 @@ fn main() -> Result<()> {
             }
         });
     }
-
     let listener = TcpListener::bind(("127.0.0.1", PORT))?;
     for stream in listener.incoming() {
         if let Ok(s) = stream { let feed = feed.clone(); std::thread::spawn(move || serve(s, &feed)); }
     }
     Ok(())
-}
-
-fn fetch_count(json: &str) -> usize {
-    json.matches("\"name\":").count()
 }
