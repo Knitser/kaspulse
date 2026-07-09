@@ -111,22 +111,35 @@ fn gate(a: &ureq::Agent, s: &str) -> Option<f64> { get(a, &format!("https://api.
 fn mexc(a: &ureq::Agent, s: &str) -> Option<f64> { pf(&get(a, &format!("https://api.mexc.com/api/v3/ticker/price?symbol={s}"))?["price"]) }
 
 // ---------- direct Kasplex DEX pool read — OUR OWN on-chain source ----------
-// eth_call getReserves() on each discovered token/WKAS pool; price in WKAS ×
-// our own KAS/USD. No third-party API — anyone can re-run the same call.
-const KASPLEX_RPC: &str = "https://evmrpc.kasplex.org";
-fn eth_call(a: &ureq::Agent, to: &str, data: &str) -> Option<String> {
+// getReserves() CROSS-CHECKED across RPCs (set KASPLEX_RPCS=https://your-node,…
+// to include your own node — then no single RPC is trusted). Windowed median
+// (TWAP) + a liquidity gate defend against flash-loan spot manipulation.
+fn kasplex_rpcs() -> Vec<String> {
+    std::env::var("KASPLEX_RPCS").ok().filter(|s| !s.is_empty())
+        .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+        .unwrap_or_else(|| vec!["https://evmrpc.kasplex.org".to_string()])
+}
+fn eth_call_cross(rpcs: &[String], to: &str, data: &str) -> Option<String> {
+    let a = agent();
     let body = format!(r#"{{"jsonrpc":"2.0","method":"eth_call","params":[{{"to":"{to}","data":"{data}"}},"latest"],"id":1}}"#);
-    let j: serde_json::Value = a.post(KASPLEX_RPC).set("content-type", "application/json").send_string(&body).ok()?.into_json().ok()?;
-    j["result"].as_str().map(|s| s.to_string())
+    let mut got = Vec::new();
+    for rpc in rpcs {
+        if let Ok(r) = a.post(rpc).set("content-type", "application/json").send_string(&body) {
+            if let Ok(j) = r.into_json::<serde_json::Value>() { if let Some(s) = j["result"].as_str() { got.push(s.to_string()); } }
+        }
+    }
+    if got.is_empty() { return None; }
+    // ≥2 RPCs must AGREE — a single compromised RPC can't move the price
+    if got.iter().all(|r| r == &got[0]) { Some(got.remove(0)) } else { eprintln!("kasplex RPC disagreement on {to} — dropping this read"); None }
 }
 fn resv(h: &str) -> Option<f64> { u128::from_str_radix(h.get(32..64)?, 16).ok().map(|v| v as f64) } // uint112 fits in the low 128 bits
-fn pool_price(a: &ureq::Agent, p: &Pool) -> Option<f64> {
-    let h = eth_call(a, &p.pool, "0x0902f1ac")?; let h = h.trim_start_matches("0x");
+fn pool_read(rpcs: &[String], p: &Pool) -> Option<(f64, f64)> { // (price_in_wkas, wkas_liquidity)
+    let h = eth_call_cross(rpcs, &p.pool, "0x0902f1ac")?; let h = h.trim_start_matches("0x");
     if h.len() < 128 { return None; }
     let (r0, r1) = (resv(&h[0..64])?, resv(&h[64..128])?);
     let (rw, rt) = if p.wkas_is_token0 { (r0, r1) } else { (r1, r0) };
     if rt <= 0.0 { return None; }
-    Some((rw / 1e18) / (rt / 10f64.powi(p.dec as i32))) // WKAS is 18-dec; token is p.dec
+    Some(((rw / 1e18) / (rt / 10f64.powi(p.dec as i32)), rw / 1e18)) // (WKAS price, WKAS liquidity)
 }
 fn kas_usd(lp: &Live) -> f64 {
     match lp.lock().unwrap().get("KAS/USD") {
@@ -134,8 +147,16 @@ fn kas_usd(lp: &Live) -> f64 {
         None => 0.0,
     }
 }
+// per-pair WKAS liquidity, for the thin-pool flag
+static LIQ: std::sync::OnceLock<Mutex<HashMap<String, f64>>> = std::sync::OnceLock::new();
+fn liq_map() -> &'static Mutex<HashMap<String, f64>> { LIQ.get_or_init(|| Mutex::new(HashMap::new())) }
+const MIN_LIQ_WKAS: f64 = 1000.0; // below this a KRC-20 feed is flagged "thin" (manipulable / low-confidence)
+const TWAP_N: usize = 12;         // ~60s window at SLOW_EVERY=5s — kills single-block flash-loan spikes
 
 fn slow_thread(lp: Live) {
+    let rpcs = kasplex_rpcs();
+    eprintln!("kasplex RPCs ({}): {}", rpcs.len(), rpcs.join(", "));
+    let mut win: HashMap<String, Vec<f64>> = HashMap::new();
     loop {
         let a = agent();
         for f in feeds() {
@@ -143,11 +164,19 @@ fn slow_thread(lp: Live) {
             if let Some(s) = f.gate   { if let Some(p) = gate(&a, s)   { set_price(&lp, &f.pair, "Gate.io", p); } }
             if let Some(s) = f.mexc   { if let Some(p) = mexc(&a, s)   { set_price(&lp, &f.pair, "MEXC", p); } }
         }
-        // KRC-20: price every discovered pool directly on-chain (getReserves × our KAS/USD)
+        // KRC-20: cross-checked pool read → windowed median (TWAP) → publish (never a raw spot)
         let ku = kas_usd(&lp);
         if ku > 0.0 {
-            let a2 = agent();
-            for f in feeds() { if let Some(p) = &f.pool { if let Some(px) = pool_price(&a2, p) { set_price(&lp, &f.pair, "Kasplex-DEX", px * ku); } } }
+            for f in feeds() {
+                if let Some(p) = &f.pool {
+                    if let Some((px_kas, liq)) = pool_read(&rpcs, p) {
+                        let w = win.entry(f.pair.clone()).or_default();
+                        w.push(px_kas * ku); if w.len() > TWAP_N { let d = w.len() - TWAP_N; w.drain(0..d); }
+                        set_price(&lp, &f.pair, "Kasplex-DEX", median(w)); // windowed median, not the manipulable spot
+                        liq_map().lock().unwrap().insert(f.pair.clone(), liq);
+                    }
+                }
+            }
         }
         std::thread::sleep(Duration::from_secs(SLOW_EVERY));
     }
@@ -182,12 +211,14 @@ fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec
         let lo = prices.iter().cloned().fold(f64::MAX, f64::min); let hi = prices.iter().cloned().fold(f64::MIN, f64::max);
         let spread = if med > 0.0 { ((hi - lo) / med) * 10_000.0 } else { 0.0 };
         let freshest = srcs.iter().map(|(_, _, a)| *a).min().unwrap_or(0);
+        let liq = liq_map().lock().unwrap().get(&cfg.pair).copied().unwrap_or(0.0);
+        let thin = cfg.kind == "krc20" && liq < MIN_LIQ_WKAS; // low-liquidity pool → manipulable, low-confidence
         let src_j: Vec<String> = srcs.iter().map(|(n, p, a)| format!(r#"{{"name":"{n}","price":{},"age_ms":{a}}}"#, enum_(*p))).collect();
         let h = hist.entry(cfg.pair.clone()).or_default(); h.push((ts, med)); if h.len() > HISTORY { let d = h.len() - HISTORY; h.drain(0..d); }
         let hist_j: Vec<String> = h.iter().map(|(t, p)| format!("[{t},{}]", enum_(*p))).collect();
         objs.push(format!(
-            r#"{{"pair":"{}","kind":"{}","price":{},"price_e8":{price_e8},"sources":[{}],"num_sources":{},"freshest_ms":{freshest},"low":{},"high":{},"spread_bps":{:.2},"median":{},"signers":[{}],"threshold":{THRESHOLD},"signatures":[{}],"message":"{msg}","history":[{}]}}"#,
-            cfg.pair, cfg.kind, enum_(med), src_j.join(","), srcs.len(), enum_(lo), enum_(hi), spread, enum_(med), signers.join(","), sigs.join(","), hist_j.join(",")
+            r#"{{"pair":"{}","kind":"{}","price":{},"price_e8":{price_e8},"sources":[{}],"num_sources":{},"freshest_ms":{freshest},"low":{},"high":{},"spread_bps":{:.2},"median":{},"twap":true,"liq_wkas":{:.0},"thin":{thin},"signers":[{}],"threshold":{THRESHOLD},"signatures":[{}],"message":"{msg}","history":[{}]}}"#,
+            cfg.pair, cfg.kind, enum_(med), src_j.join(","), srcs.len(), enum_(lo), enum_(hi), spread, enum_(med), liq, signers.join(","), sigs.join(","), hist_j.join(",")
         ));
     }
     format!(r#"{{"round":{round},"timestamp":{ts},"threshold":{THRESHOLD},"num_nodes":{N_NODES},"transport":"websocket","feeds":[{}]}}"#, objs.join(","))
