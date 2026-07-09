@@ -32,15 +32,17 @@ struct FeedCfg {
     gate: Option<&'static str>,
     bybit: Option<&'static str>,
     mexc: Option<&'static str>,
-    coingecko: Option<&'static str>,
+    coingecko: Option<&'static str>,      // CoinGecko id (aggregator)
+    geckoterminal: Option<&'static str>,  // Kasplex tick — reads the on-chain DEX pool
 }
 fn feeds() -> Vec<FeedCfg> {
     vec![
-        FeedCfg { pair: "KAS/USD",  kind: "major", kraken: Some("KASUSD"), kucoin: Some("KAS-USDT"), gate: Some("KAS_USDT"), bybit: Some("KASUSDT"), mexc: Some("KASUSDT"), coingecko: None },
-        FeedCfg { pair: "BTC/USD",  kind: "major", kraken: Some("XBTUSD"), kucoin: Some("BTC-USDT"), gate: Some("BTC_USDT"), bybit: Some("BTCUSDT"), mexc: Some("BTCUSDT"), coingecko: None },
-        FeedCfg { pair: "ETH/USD",  kind: "major", kraken: Some("ETHUSD"), kucoin: Some("ETH-USDT"), gate: Some("ETH_USDT"), bybit: Some("ETHUSDT"), mexc: Some("ETHUSDT"), coingecko: None },
-        FeedCfg { pair: "NACHO/USD", kind: "krc20", kraken: None, kucoin: None, gate: None, bybit: None, mexc: None, coingecko: Some("nacho-the-kat") },
-        FeedCfg { pair: "KASPY/USD", kind: "krc20", kraken: None, kucoin: None, gate: None, bybit: None, mexc: None, coingecko: Some("kaspy") },
+        FeedCfg { pair: "KAS/USD",  kind: "major", kraken: Some("KASUSD"), kucoin: Some("KAS-USDT"), gate: Some("KAS_USDT"), bybit: Some("KASUSDT"), mexc: Some("KASUSDT"), coingecko: None, geckoterminal: None },
+        FeedCfg { pair: "BTC/USD",  kind: "major", kraken: Some("XBTUSD"), kucoin: Some("BTC-USDT"), gate: Some("BTC_USDT"), bybit: Some("BTCUSDT"), mexc: Some("BTCUSDT"), coingecko: None, geckoterminal: None },
+        FeedCfg { pair: "ETH/USD",  kind: "major", kraken: Some("ETHUSD"), kucoin: Some("ETH-USDT"), gate: Some("ETH_USDT"), bybit: Some("ETHUSDT"), mexc: Some("ETHUSDT"), coingecko: None, geckoterminal: None },
+        // KRC-20: aggregator (CoinGecko) + on-chain DEX pool (GeckoTerminal/Kasplex). Pin by network=kasplex so we never grab a same-symbol token on another chain.
+        FeedCfg { pair: "NACHO/USD", kind: "krc20", kraken: None, kucoin: None, gate: None, bybit: None, mexc: None, coingecko: Some("nacho-the-kat"), geckoterminal: Some("NACHO") },
+        FeedCfg { pair: "KASPY/USD", kind: "krc20", kraken: None, kucoin: None, gate: None, bybit: None, mexc: None, coingecko: Some("kaspy"), geckoterminal: Some("KASPY") },
     ]
 }
 
@@ -81,7 +83,34 @@ fn coingecko_batch(ids: &[&str]) -> HashMap<String, f64> {
     m
 }
 
-fn fetch_feed(cfg: &FeedCfg, cg: &HashMap<String, f64>) -> Vec<(&'static str, f64)> {
+/// Read KRC-20 prices from GeckoTerminal's Kasplex DEX pools — the actual
+/// on-chain liquidity, not an aggregator. Pinned to network=kasplex so a
+/// same-symbol token on another chain (there are 5+ "NACHO"s!) can't leak in.
+static GT_CACHE: std::sync::OnceLock<Mutex<HashMap<String, f64>>> = std::sync::OnceLock::new();
+static GT_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn geckoterminal_batch(ticks: &[&str]) -> HashMap<String, f64> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut m = HashMap::new();
+    if ticks.is_empty() { return m; }
+    let cache = GT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if now().saturating_sub(GT_LAST.load(Relaxed)) >= CG_EVERY {
+        let a = agent();
+        for tick in ticks {
+            if let Some(j) = get(&a, &format!("https://api.geckoterminal.com/api/v2/search/pools?query={tick}&network=kasplex")) {
+                if let Some(p) = j["data"].as_array().and_then(|arr| arr.iter().find_map(|pool| {
+                    let name = pool["attributes"]["name"].as_str()?;
+                    if name.to_uppercase().starts_with(&tick.to_uppercase()) { pool["attributes"]["base_token_price_usd"].as_str()?.parse::<f64>().ok() } else { None }
+                })) { m.insert(tick.to_string(), p); }
+            }
+        }
+        if !m.is_empty() { GT_LAST.store(now(), Relaxed); let mut c = cache.lock().unwrap(); for (k, v) in &m { c.insert(k.clone(), *v); } }
+    }
+    let c = cache.lock().unwrap();
+    for tick in ticks { if !m.contains_key(*tick) { if let Some(v) = c.get(*tick) { m.insert(tick.to_string(), *v); } } }
+    m
+}
+
+fn fetch_feed(cfg: &FeedCfg, cg: &HashMap<String, f64>, gt: &HashMap<String, f64>) -> Vec<(&'static str, f64)> {
     let a = agent();
     let mut out = Vec::new();
     if let Some(s) = cfg.kraken { if let Some(p) = kraken(&a, s) { out.push(("Kraken", p)); } }
@@ -90,15 +119,16 @@ fn fetch_feed(cfg: &FeedCfg, cg: &HashMap<String, f64>) -> Vec<(&'static str, f6
     if let Some(s) = cfg.bybit  { if let Some(p) = bybit(&a, s)  { out.push(("Bybit", p)); } }
     if let Some(s) = cfg.mexc   { if let Some(p) = mexc(&a, s)   { out.push(("MEXC", p)); } }
     if let Some(id) = cfg.coingecko { if let Some(p) = cg.get(id) { out.push(("CoinGecko", *p)); } }
+    if let Some(t) = cfg.geckoterminal { if let Some(p) = gt.get(t) { out.push(("GeckoTerminal", *p)); } }
     out
 }
 
 /// fetch every feed in parallel (one thread per feed).
 fn fetch_all(cfgs: &[FeedCfg]) -> Vec<Vec<(&'static str, f64)>> {
-    let ids: Vec<&str> = cfgs.iter().filter_map(|c| c.coingecko).collect();
-    let cg = coingecko_batch(&ids);
+    let cg = coingecko_batch(&cfgs.iter().filter_map(|c| c.coingecko).collect::<Vec<_>>());
+    let gt = geckoterminal_batch(&cfgs.iter().filter_map(|c| c.geckoterminal).collect::<Vec<_>>());
     std::thread::scope(|s| {
-        let handles: Vec<_> = cfgs.iter().map(|c| s.spawn(|| fetch_feed(c, &cg))).collect();
+        let handles: Vec<_> = cfgs.iter().map(|c| s.spawn(|| fetch_feed(c, &cg, &gt))).collect();
         handles.into_iter().map(|h| h.join().unwrap_or_default()).collect()
     })
 }
