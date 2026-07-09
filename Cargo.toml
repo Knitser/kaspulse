@@ -10,6 +10,7 @@ secp256k1 = { version = "0.29", features = ["global-context", "rand-std"] }
 blake2b_simd = "1"
 anyhow = "1"
 hex = "0.4"
+tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 
 # on-chain publishing + consumer (the `onchain` bin) — heavy Kaspa tx stack,
 # optional so `oracle` and `verify` build in seconds.
@@ -39,3 +40,7 @@ required-features = ["onchain"]
 
 [profile.release]
 opt-level = 2
+
+[[bin]]
+name = "wsspike"
+path = "src/wsspike.rs"
