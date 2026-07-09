@@ -78,5 +78,245 @@
   "dec": 18,
   "wkas_liq": 21567.5,
   "px_wkas": 1.5724333248300117e-05
+ },
+ {
+  "symbol": "CYPU",
+  "pair": "0x31cce71fde115aa67fd194d172e3c200a928628d",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "wkas_liq": 21332.0,
+  "px_wkas": 0.1282406539778481
+ },
+ {
+  "symbol": "KDOG",
+  "pair": "0x99127d846ff3fff9a3f1f6bc426806fa461dac1e",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 19485.5,
+  "px_wkas": 2.578644468278916e-05
+ },
+ {
+  "symbol": "BTC",
+  "pair": "0xc86b4c8319dd2ca7f69f2121606c7446d3b14092",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 19216.5,
+  "px_wkas": 0.0013785467557524045
+ },
+ {
+  "symbol": "FDBR",
+  "pair": "0x7994a5e589e7be804c29360cfdf822eab9abb727",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "wkas_liq": 18926.1,
+  "px_wkas": 0.02324976373484349
+ },
+ {
+  "symbol": "LUL",
+  "pair": "0xdf0f0fcabdd713b15e7c6bfca18f37fb1f209465",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "wkas_liq": 18616.1,
+  "px_wkas": 2.488735599507275e-05
+ },
+ {
+  "symbol": "MARK",
+  "pair": "0x51142ecd54944d4c2ac44fefa9cdba7da0d2be9a",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 17491.7,
+  "px_wkas": 2.1549610703440563e-05
+ },
+ {
+  "symbol": "KBROS",
+  "pair": "0xbcabdc60754fa37a6a89be84452e3d93d77cfb46",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "wkas_liq": 17121.6,
+  "px_wkas": 1.9622840973980554e-05
+ },
+ {
+  "symbol": "NOISE",
+  "pair": "0x31fbf804125730abee729171c6b69222f4d86bec",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 17071.9,
+  "px_wkas": 7.0008107515855e-05
+ },
+ {
+  "symbol": "NICK",
+  "pair": "0x7730ad614c062e5f7ce8370134bc07fe7f8605b2",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "wkas_liq": 16461.2,
+  "px_wkas": 0.00019007692522035236
+ },
+ {
+  "symbol": "CYPUV",
+  "pair": "0x462c2becdf3b2e643cefa3354f549cfc118bab8c",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 12056.9,
+  "px_wkas": 0.002687782431872952
+ },
+ {
+  "symbol": "KASPER",
+  "pair": "0xe52457068892b849e0984e3fc606048755e407e6",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "wkas_liq": 10878.2,
+  "px_wkas": 0.0002953111857694543
+ },
+ {
+  "symbol": "PLUTO",
+  "pair": "0xa4174d817a93f261679354bb47c8e9ad08062713",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 9646.8,
+  "px_wkas": 1.303646695918744e-06
+ },
+ {
+  "symbol": "KASMO",
+  "pair": "0x4850cf4f2b416e846bf924a77fdf051700309227",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 3335.4,
+  "px_wkas": 0.001761585460667895
+ },
+ {
+  "symbol": "KREX",
+  "pair": "0x94672dbff8bc578a691de02769ede4c41d398f6c",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "wkas_liq": 3160.8,
+  "px_wkas": 0.00014744253755312461
+ },
+ {
+  "symbol": "GHOAD",
+  "pair": "0x3f7dd2c41fa72a9f60d5a520f1446a821c962d9f",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 898.0,
+  "px_wkas": 0.001404281660967751
+ },
+ {
+  "symbol": "BONKEY",
+  "pair": "0xe1c171630837e2922fc2629a09173179db9ac394",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 828.8,
+  "px_wkas": 1.1640703710654795e-07
+ },
+ {
+  "symbol": "KEIRO",
+  "pair": "0x5e97c3fe4a8b1b8c21843c604b592eb1b72e8e37",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 422.9,
+  "px_wkas": 1.624341049408754e-05
+ },
+ {
+  "symbol": "GAMER",
+  "pair": "0x63d4855c785dc23e53478fcbf76c72e0f650b820",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 390.4,
+  "px_wkas": 0.005704604701146695
+ },
+ {
+  "symbol": "MTGOX",
+  "pair": "0x39d6167227c90804b48557aac3c97db24380058c",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 345.7,
+  "px_wkas": 0.028231308900456352
+ },
+ {
+  "symbol": "SPHERE",
+  "pair": "0x1a86f6a09bb25244f5809eaea22eec8276d11ec5",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "wkas_liq": 267.1,
+  "px_wkas": 4.173870089246476
+ },
+ {
+  "symbol": "KASBTC",
+  "pair": "0xbc27e89f2e3d1c903db89fe2ae58c0253494fb21",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "wkas_liq": 240.3,
+  "px_wkas": 0.5569052334518907
+ },
+ {
+  "symbol": "yoni",
+  "pair": "0x04436780e07a6eac58f4e40e59e976d90db62391",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 223.5,
+  "px_wkas": 2.660956615175665e-07
+ },
+ {
+  "symbol": "PEPE",
+  "pair": "0x19855dbfac69cd39f089d7b7aeccac99e44f8859",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 186.5,
+  "px_wkas": 1.2538233916448388e-05
+ },
+ {
+  "symbol": "KOMA",
+  "pair": "0x93e33cd83d9de3811d49231b57a29337ad057fe9",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "wkas_liq": 166.9,
+  "px_wkas": 7.462457896697638e-09
+ },
+ {
+  "symbol": "FIRST",
+  "pair": "0xefeffa665e96321a717ba5a98dc37477d6d35f24",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 146.2,
+  "px_wkas": 4.101657963984045e-05
+ },
+ {
+  "symbol": "SLIPPY",
+  "pair": "0xdefa1b26763cc0cbe4c0e262785172cb0d05aa35",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 123.4,
+  "px_wkas": 5.782046885329359e-06
+ },
+ {
+  "symbol": "PICK",
+  "pair": "0xbcb57c033cd9b7e28ef6edac07d72ab4110aaf7d",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 120.0,
+  "px_wkas": 4.792e-05
+ },
+ {
+  "symbol": "KANDA",
+  "pair": "0xf67ecb8021a6ba30dcc410f03f2a58ef1309e8e5",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "wkas_liq": 104.0,
+  "px_wkas": 1.0389222261083102e-08
+ },
+ {
+  "symbol": "FKTRP",
+  "pair": "0x6cf79caf6ae8dffc95d27d3c75327196dfbcd026",
+  "wkas_is_token0": false,
+  "dec": 8,
+  "wkas_liq": 101.4,
+  "px_wkas": 1.9736109878143282e-05
+ },
+ {
+  "symbol": "puppy",
+  "pair": "0x2d94c0a696b431a66e2e67609d028960c8cf2fcd",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "wkas_liq": 65.0,
+  "px_wkas": 7.03625e-05
  }
 ]

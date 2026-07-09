@@ -34,6 +34,6 @@ def info(pair):
 rows=[r for r in ex.map(info, pairs) if r]
 rows.sort(key=lambda r:-r["wkas_liq"])
 print(f"\n{len(rows)} live WKAS-paired KRC-20 tokens (by liquidity):")
-for r in rows[:14]: print(f"  {r['symbol']:12} liq={r['wkas_liq']:>10} WKAS  ~${r['px_wkas']*0.0292:.9f}  pool {r['pair']}")
-json.dump(rows[:10], open("/Users/michielhamblok/Documents/code/Kaspa/kaspulse/pools.json","w"), indent=1)
+for r in rows[:6]: print(f"  {r['symbol']:12} liq={r['wkas_liq']:>10} WKAS  ~${r['px_wkas']*0.0292:.9f}  pool {r['pair']}")
+json.dump(rows, open("/Users/michielhamblok/Documents/code/Kaspa/kaspulse/pools.json","w"), indent=1)
 print(f"\nsaved top {min(10,len(rows))} to pools.json")
