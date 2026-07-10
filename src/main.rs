@@ -44,9 +44,8 @@ fn set_price(lp: &Live, pair: &str, ex: &'static str, price: f64) {
 // chains (Kasplex + Igra) — each is a separate on-chain source; build() medians.
 #[derive(Clone)]
 struct Pool { symbol: String, pool: String, wkas_is_token0: bool, dec: u32, chain: String }
-static POOLS: std::sync::OnceLock<Vec<Pool>> = std::sync::OnceLock::new();
-fn load_pools() -> &'static Vec<Pool> {
-    POOLS.get_or_init(|| serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string("pools.json").unwrap_or_default()).ok()
+fn parse_pools(s: &str) -> Vec<Pool> {
+    serde_json::from_str::<serde_json::Value>(s).ok()
         .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|p| {
             let symbol = p["symbol"].as_str()?.to_string();
             // a KRC-20 meme token named KAS/BTC/ETH must NOT collide with the real major feeds
@@ -54,8 +53,14 @@ fn load_pools() -> &'static Vec<Pool> {
             Some(Pool { symbol, pool: p["pair"].as_str()?.to_string(),
                 wkas_is_token0: p["wkas_is_token0"].as_bool()?, dec: p["dec"].as_u64()? as u32,
                 chain: p["chain"].as_str().unwrap_or("kasplex").to_string() })
-        }).collect())).unwrap_or_default())
+        }).collect())).unwrap_or_default()
 }
+// runtime-updatable so the discovery thread can refresh it without a restart
+static POOLS: std::sync::OnceLock<Mutex<Arc<Vec<Pool>>>> = std::sync::OnceLock::new();
+fn pools_cell() -> &'static Mutex<Arc<Vec<Pool>>> {
+    POOLS.get_or_init(|| Mutex::new(Arc::new(parse_pools(&std::fs::read_to_string("pools.json").unwrap_or_default()))))
+}
+fn load_pools() -> Arc<Vec<Pool>> { pools_cell().lock().unwrap().clone() }
 #[derive(Clone)]
 struct FeedCfg { pair: String, kind: &'static str, kucoin: Option<&'static str>, gate: Option<&'static str>, mexc: Option<&'static str> }
 fn feeds() -> Vec<FeedCfg> {
@@ -65,7 +70,8 @@ fn feeds() -> Vec<FeedCfg> {
         FeedCfg { pair: "ETH/USD".into(), kind: "major", kucoin: Some("ETH-USDT"), gate: Some("ETH_USDT"), mexc: Some("ETHUSDT") },
     ];
     let mut seen = std::collections::HashSet::new();
-    for p in load_pools() { if seen.insert(p.symbol.clone()) { v.push(FeedCfg { pair: format!("{}/USD", p.symbol), kind: "krc20", kucoin: None, gate: None, mexc: None }); } }
+    let pl = load_pools();
+    for p in pl.iter() { if seen.insert(p.symbol.clone()) { v.push(FeedCfg { pair: format!("{}/USD", p.symbol), kind: "krc20", kucoin: None, gate: None, mexc: None }); } }
     v
 }
 
@@ -196,6 +202,82 @@ fn liq_map() -> &'static Mutex<HashMap<String, f64>> { LIQ.get_or_init(|| Mutex:
 const MIN_LIQ_WKAS: f64 = 1000.0; // below this a KRC-20 feed is flagged "thin" (manipulable / low-confidence)
 const TWAP_N: usize = 12;         // ~60s window at SLOW_EVERY=5s — kills single-block flash-loan spikes
 
+// ---------- auto-discovery: re-enumerate the DEX factories on-chain ----------
+struct Venue { chain: &'static str, factory: &'static str }
+fn venues() -> [Venue; 3] {
+    [ Venue { chain: "kasplex", factory: "0xa9cba43a407c9eb30933ea21f7b9d74a128d613c" },
+      Venue { chain: "igra",    factory: "0x98Bb580A77eE329796a79aBd05c6D2F2b3D5E1bD" },
+      Venue { chain: "igrakc",  factory: "0x21350BcDa9E81731CF4cDE3DbC457e3de2739c01" } ]
+}
+fn call_u128(rpcs: &[String], to: &str, data: &str) -> Option<u128> {
+    let h = eth_call_cross(rpcs, to, data)?; let h = h.trim_start_matches("0x");
+    if h.len() < 64 { return None; } u128::from_str_radix(&h[32..64], 16).ok()
+}
+fn call_addr(rpcs: &[String], to: &str, data: &str) -> Option<String> {
+    let h = eth_call_cross(rpcs, to, data)?; let h = h.trim_start_matches("0x");
+    if h.len() < 64 { return None; } Some(format!("0x{}", &h[24..64]))
+}
+fn call_str(rpcs: &[String], to: &str, data: &str) -> Option<String> {
+    let h = eth_call_cross(rpcs, to, data)?; let h = h.trim_start_matches("0x");
+    if h.len() < 128 { return None; }
+    let len = usize::from_str_radix(&h[64..128], 16).ok()?;
+    let bytes: Vec<u8> = (0..len.min(64)).filter_map(|i| u8::from_str_radix(h.get(128 + i*2..130 + i*2)?, 16).ok()).collect();
+    let s = String::from_utf8_lossy(&bytes).trim_matches(|c: char| c == '\0' || c.is_control()).to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+fn par<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let mut out = Vec::with_capacity(items.len());
+    for chunk in items.chunks(16) {
+        let mut part: Vec<R> = std::thread::scope(|s| chunk.iter().map(|it| s.spawn(|| f(it)))
+            .collect::<Vec<_>>().into_iter().map(|h| h.join().unwrap()).collect());
+        out.append(&mut part);
+    }
+    out
+}
+fn discover_venue(v: &Venue) -> Vec<Pool> {
+    let rpcs = chain_rpcs(v.chain);
+    let n = match call_u128(&rpcs, v.factory, "0x574f2ba3") { Some(n) if (1..5000).contains(&n) => n as usize, _ => return vec![] };
+    let idx: Vec<usize> = (0..n).collect();
+    let pairs: Vec<String> = par(&idx, |i| call_addr(&rpcs, v.factory, &format!("0x1e3dd18b{i:064x}")).unwrap_or_default())
+        .into_iter().filter(|p| p.len() == 42 && !p.ends_with(&"0".repeat(40))).collect();
+    let toks: Vec<(String, String)> = par(&pairs, |p| (call_addr(&rpcs, p, "0x0dfe1681").unwrap_or_default(), call_addr(&rpcs, p, "0xd21220a7").unwrap_or_default()));
+    let mut freq: HashMap<String, u32> = HashMap::new();
+    for (a, b) in &toks { *freq.entry(a.clone()).or_insert(0) += 1; *freq.entry(b.clone()).or_insert(0) += 1; }
+    let base = match freq.into_iter().filter(|(k, _)| k.len() == 42).max_by_key(|(_, c)| *c).map(|(k, _)| k) { Some(b) => b, None => return vec![] };
+    let entries: Vec<(String, bool, String)> = pairs.into_iter().zip(toks).filter_map(|(p, (t0, t1))| {
+        if t0 == base { Some((p, true, t1)) } else if t1 == base { Some((p, false, t0)) } else { None }
+    }).collect();
+    par(&entries, |(pool, b0, tok)| {
+        let h = eth_call_cross(&rpcs, pool, "0x0902f1ac")?; let h = h.trim_start_matches("0x");
+        if h.len() < 128 { return None; }
+        let (rw, rt) = if *b0 { (resv(&h[0..64])?, resv(&h[64..128])?) } else { (resv(&h[64..128])?, resv(&h[0..64])?) };
+        if rw / 1e18 < 50.0 || rt <= 0.0 { return None; }
+        let sym = call_str(&rpcs, tok, "0x95d89b41")?;
+        if matches!(sym.to_uppercase().as_str(), "KAS" | "BTC" | "ETH" | "WKAS" | "WIKAS") { return None; }
+        let dec = call_u128(&rpcs, tok, "0x313ce567").map(|d| d as u32).filter(|d| *d <= 30).unwrap_or(18);
+        Some(Pool { symbol: sym, pool: pool.clone(), wkas_is_token0: *b0, dec, chain: v.chain.to_string() })
+    }).into_iter().flatten().collect()
+}
+fn pools_to_json(pools: &[Pool]) -> String {
+    let items: Vec<String> = pools.iter().map(|p| format!(r#"{{"symbol":"{}","pair":"{}","wkas_is_token0":{},"dec":{},"chain":"{}"}}"#, p.symbol, p.pool, p.wkas_is_token0, p.dec, p.chain)).collect();
+    format!("[{}]", items.join(","))
+}
+fn discover_thread() {
+    std::thread::sleep(Duration::from_secs(45)); // let the oracle stabilize; startup uses the cached pools.json
+    loop {
+        let mut all = Vec::new();
+        for v in venues() { all.extend(discover_venue(&v)); }
+        if all.len() >= 10 { // sanity gate — never clobber the live set with a near-empty enumeration
+            let _ = std::fs::write("pools.json", pools_to_json(&all));
+            *pools_cell().lock().unwrap() = Arc::new(all);
+            eprintln!("auto-discovery: refreshed {} pools across {} venues", load_pools().len(), venues().len());
+        } else {
+            eprintln!("auto-discovery: only {} pools found — keeping the current set", all.len());
+        }
+        std::thread::sleep(Duration::from_secs(600)); // every 10 min
+    }
+}
+
 fn slow_thread(lp: Live) {
     for c in CHAINS { let r = chain_rpcs(c); eprintln!("{c} RPCs ({}): {}", r.len(), r.join(", ")); }
     let mut win: HashMap<String, Vec<f64>> = HashMap::new();
@@ -211,7 +293,8 @@ fn slow_thread(lp: Live) {
         let ku = kas_usd(&lp);
         if ku > 0.0 {
             // read pools in parallel (bounded concurrency) so the whole set refreshes in seconds, not a minute
-            for chunk in load_pools().chunks(12) {
+            let pl = load_pools();
+            for chunk in pl.chunks(12) {
                 let reads: Vec<(String, &str, Option<(f64, f64)>)> = std::thread::scope(|s| {
                     chunk.iter().map(|p| s.spawn(move || (format!("{}/USD", p.symbol), p.chain.as_str(), pool_read(&chain_rpcs(&p.chain), p))))
                         .collect::<Vec<_>>().into_iter().map(|h| h.join().unwrap()).collect()
@@ -380,6 +463,7 @@ fn main() -> Result<()> {
     println!("  KRC-20: CoinGecko + GeckoTerminal (Kasplex DEX)");
     println!("serving http://127.0.0.1:{PORT}");
 
+    std::thread::spawn(discover_thread);
     let lp: Live = Arc::new(Mutex::new(HashMap::new()));
     for (f, lpc) in [ws_kraken as fn(Live), ws_bybit, ws_okx, ws_coinbase, slow_thread].into_iter().zip(std::iter::repeat(lp.clone())) {
         std::thread::spawn(move || f(lpc));
