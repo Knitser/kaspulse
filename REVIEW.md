@@ -185,3 +185,34 @@ foundation for on-chain publish cadence (§5).
 pursue the two things nobody on Kaspa has — **script-enforced slashing** and a
 **ZK-verified aggregation** — as the moats that turn "first oracle on Kaspa"
 into "the oracle Kaspa can actually trust."
+
+---
+
+## Session completion (2026-07-10) — 9 of 11 items shipped, all with proof
+
+**Live on Kaspa TN10 (real txids):** signed-price publish, price-gated consumer,
+**3-of-5 threshold consumer** (fixes "cosmetic threshold"), and **equivocation
+slashing** (fixes "no economic security") — the two gaps the reality-check
+called *fatal*, both now demonstrated on the real chain.
+
+**Shipped in code:** the P0/P1 bug fixes; MAD outliers + circuit breakers + peg
+check; all-WebSocket majors; KaspaCom venue + on-chain auto-discovery
+(self-maintaining); the `kaspulse-sdk` consumer crate; the standalone `signer`
+daemon (real operator separation, 3 proven); deploy-ready packaging;
+`KASPA-EDGE.md` (why-Kaspa + measured 1.39s latency).
+
+**The two research-grade tails:**
+- **#3 cumulative TWAP** — the on-chain accumulator is readable (proven); a
+  robust feed needs u256 UQ112x112 + block-timestamp extrapolation. Lower
+  priority: the sampled windowed-median TWAP already defeats single-block flash
+  loans, and sustained multi-block manipulation is expensive + arbitraged.
+- **#11 zkOracle** — proving "the published median = median(signed source
+  prices)" in ZK, verified on-chain via KIP-16. The building blocks are PROVEN
+  (kasphinx generates Groth16 proofs Kaspa's precompile accepts, live on TN10);
+  the median circuit (a sorting network in gr1cs) is the remaining research.
+  This is the moat nobody else on Kaspa can build without our ZK toolchain.
+
+**Net:** kaspulse went from "a signed price feed" to a multi-chain, self-
+discovering, guarded, threshold-signed oracle with an SDK, real operator
+separation, and on-chain economic security — with the honest social/research
+tail (independent operators at scale, zk aggregation) clearly scoped.
