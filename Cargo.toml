@@ -49,3 +49,8 @@ path = "src/wsspike.rs"
 name = "latency"
 path = "src/latency.rs"
 required-features = ["onchain"]
+
+[[bin]]
+name = "slash"
+path = "src/slash.rs"
+required-features = ["onchain"]
