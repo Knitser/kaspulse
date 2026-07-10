@@ -1,0 +1,56 @@
+[
+ {
+  "symbol": "SPUDZ",
+  "pair": "0x0f9480fcb1b44143165f8c441cfbe3659e627487",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "chain": "igra",
+  "dex": "kaspacom",
+  "wkas_liq": 140699.2
+ },
+ {
+  "symbol": "CEO",
+  "pair": "0x14f28797c928a9897d65370e00812a898f0cc117",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "dex": "kaspacom",
+  "wkas_liq": 140333.6
+ },
+ {
+  "symbol": "USDC",
+  "pair": "0x2c2aa3a5227cbb29aa40ab8456d977523e8ffc38",
+  "wkas_is_token0": true,
+  "dec": 6,
+  "chain": "igra",
+  "dex": "kaspacom",
+  "wkas_liq": 62298.1
+ },
+ {
+  "symbol": "KASPY",
+  "pair": "0x30b3e9d62064900d8629aa7b541e905b3f2e7caa",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "dex": "kaspacom",
+  "wkas_liq": 26787.4
+ },
+ {
+  "symbol": "KASLOT",
+  "pair": "0x28ecc4e3ce861dd7dda112ab1235f00cf55912e9",
+  "wkas_is_token0": true,
+  "dec": 18,
+  "chain": "igra",
+  "dex": "kaspacom",
+  "wkas_liq": 21409.1
+ },
+ {
+  "symbol": "IGRA",
+  "pair": "0x73398306cc857aad07c938cfa434c0f4dc144b6f",
+  "wkas_is_token0": false,
+  "dec": 18,
+  "chain": "igra",
+  "dex": "kaspacom",
+  "wkas_liq": 6535.1
+ }
+]

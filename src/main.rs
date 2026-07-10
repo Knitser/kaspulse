@@ -126,16 +126,19 @@ fn mexc(a: &ureq::Agent, s: &str) -> Option<f64> { pf(&get(a, &format!("https://
 // getReserves() CROSS-CHECKED across RPCs (set KASPLEX_RPCS=https://your-node,…
 // to include your own node — then no single RPC is trusted). Windowed median
 // (TWAP) + a liquidity gate defend against flash-loan spot manipulation.
+// a "chain" tag identifies (network, DEX): igra=Igra/Zealous, igrakc=Igra/KaspaCom.
+// Both Igra venues share the Igra RPC but are DISTINCT price sources → medianed.
+const CHAINS: [&str; 3] = ["kasplex", "igra", "igrakc"];
 fn chain_rpcs(chain: &str) -> Vec<String> {
     let (env, default) = match chain {
-        "igra" => ("IGRA_RPCS", "https://rpc.igralabs.com:8545"),
+        "igra" | "igrakc" => ("IGRA_RPCS", "https://rpc.igralabs.com:8545"),
         _ => ("KASPLEX_RPCS", "https://evmrpc.kasplex.org"),
     };
     std::env::var(env).ok().filter(|s| !s.is_empty())
         .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
         .unwrap_or_else(|| vec![default.to_string()])
 }
-fn dex_source(chain: &str) -> &'static str { match chain { "igra" => "Igra-DEX", _ => "Kasplex-DEX" } }
+fn dex_source(chain: &str) -> &'static str { match chain { "igra" => "Igra-Zealous", "igrakc" => "Igra-KaspaCom", _ => "Kasplex-Zealous" } }
 fn eth_call_cross(rpcs: &[String], to: &str, data: &str) -> Option<String> {
     let a = agent();
     let body = format!(r#"{{"jsonrpc":"2.0","method":"eth_call","params":[{{"to":"{to}","data":"{data}"}},"latest"],"id":1}}"#);
@@ -178,7 +181,7 @@ const MIN_LIQ_WKAS: f64 = 1000.0; // below this a KRC-20 feed is flagged "thin" 
 const TWAP_N: usize = 12;         // ~60s window at SLOW_EVERY=5s — kills single-block flash-loan spikes
 
 fn slow_thread(lp: Live) {
-    for c in ["kasplex", "igra"] { let r = chain_rpcs(c); eprintln!("{c} RPCs ({}): {}", r.len(), r.join(", ")); }
+    for c in CHAINS { let r = chain_rpcs(c); eprintln!("{c} RPCs ({}): {}", r.len(), r.join(", ")); }
     let mut win: HashMap<String, Vec<f64>> = HashMap::new();
     loop {
         let a = agent();
@@ -313,7 +316,7 @@ fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec
         let freshest = r.srcs.iter().map(|(_, _, a)| *a).min().unwrap_or(0);
         // deepest CURRENT venue liquidity (per-chain entries are overwritten each round — drained pools decay)
         let liq = { let lm = liq_map().lock().unwrap();
-            ["kasplex", "igra"].iter().filter_map(|c| lm.get(&format!("{}|{c}", r.cfg.pair))).cloned().fold(0.0_f64, f64::max) };
+            CHAINS.iter().filter_map(|c| lm.get(&format!("{}|{c}", r.cfg.pair))).cloned().fold(0.0_f64, f64::max) };
         let thin = r.cfg.kind == "krc20" && liq < MIN_LIQ_WKAS; // low-liquidity pool → manipulable, low-confidence
         let src_j: Vec<String> = r.srcs.iter().map(|(n, p, a)| format!(r#"{{"name":"{n}","price":{},"age_ms":{a}}}"#, enum_(*p))).collect();
         let out_j: Vec<String> = r.outliers.iter().map(|n| format!("\"{n}\"")).collect();
