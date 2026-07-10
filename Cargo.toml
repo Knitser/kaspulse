@@ -59,3 +59,9 @@ required-features = ["onchain"]
 name = "slash_live"
 path = "src/slash_live.rs"
 required-features = ["onchain"]
+
+
+[[bin]]
+name = "consumer_live"
+path = "src/consumer_live.rs"
+required-features = ["onchain"]
