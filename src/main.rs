@@ -483,7 +483,10 @@ fn main() -> Result<()> {
             }
         });
     }
-    let listener = TcpListener::bind(("127.0.0.1", PORT))?;
+    // bind 0.0.0.0:$PORT so it runs behind Cloud Run / a reverse proxy (PORT env),
+    // falling back to the local default
+    let port: u16 = std::env::var("PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(PORT);
+    let listener = TcpListener::bind(("0.0.0.0", port))?;
     for stream in listener.incoming() { if let Ok(s) = stream { let feed = feed.clone(); std::thread::spawn(move || serve(s, &feed)); } }
     Ok(())
 }
