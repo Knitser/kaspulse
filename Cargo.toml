@@ -44,3 +44,8 @@ opt-level = 2
 [[bin]]
 name = "wsspike"
 path = "src/wsspike.rs"
+
+[[bin]]
+name = "latency"
+path = "src/latency.rs"
+required-features = ["onchain"]

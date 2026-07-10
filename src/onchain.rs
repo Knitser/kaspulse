@@ -72,7 +72,10 @@ fn load_oracle_key() -> Keypair {
     Keypair::from_secret_key(SECP256K1, &sk)
 }
 fn load_funding_key() -> Result<Keypair> {
-    let raw = std::fs::read_to_string("/tmp/kascov-lab-key.hex").context("need a funded TN10 key at /tmp/kascov-lab-key.hex")?;
+    let home = std::env::var("HOME").unwrap_or_default();
+    let raw = std::fs::read_to_string(format!("{home}/.kaspulse/tn10.key"))
+        .or_else(|_| std::fs::read_to_string("/tmp/kascov-lab-key.hex"))
+        .context("need a funded TN10 key at ~/.kaspulse/tn10.key")?;
     let sk = secp256k1::SecretKey::from_slice(&hex::decode(raw.trim())?)?;
     Ok(Keypair::from_secret_key(SECP256K1, &sk))
 }
