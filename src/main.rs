@@ -237,47 +237,100 @@ fn mant_expo(p: f64) -> (u64, i32) {
 /// heartbeat, so signing cost tracks price CHANGES, not the serve loop.
 struct SignCache { mant: u64, expo: i32, msg: String, sigs_json: String, ts: u64, round: u64 }
 
-fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec<(u64, f64)>>, scache: &mut HashMap<String, SignCache>) -> String {
+// ---- integrity guards (REVIEW §2/§3) ----
+const BREAK_PCT: f64 = 0.20;   // a >20% one-round jump is HELD (publish last good)…
+const BREAK_ROUNDS: u32 = 12;  // …unless it persists ~5s of rounds — then it's a real move
+const PEG_TOL: f64 = 0.02;     // the Igra USDC feed must sit within 2% of $1.00
+
+/// MAD outlier filter: with ≥4 sources, drop anything further than
+/// max(4×MAD, 0.3%) from the median — a hijacked venue contributes NOTHING.
+/// Never drops below 2 surviving sources.
+fn mad_filter(srcs: &mut Vec<(&str, f64, u64)>) -> Vec<String> {
+    if srcs.len() < 4 { return vec![]; }
+    let prices: Vec<f64> = srcs.iter().map(|(_, p, _)| *p).collect();
+    let m = median(&prices);
+    let devs: Vec<f64> = prices.iter().map(|p| (p - m).abs()).collect();
+    let tol = (4.0 * median(&devs)).max(m * 0.003);
+    let dropped: Vec<String> = srcs.iter().filter(|(_, p, _)| (p - m).abs() > tol).map(|(n, _, _)| n.to_string()).collect();
+    if dropped.is_empty() || srcs.len() - dropped.len() < 2 { return vec![]; }
+    srcs.retain(|(_, p, _)| (p - m).abs() <= tol);
+    dropped
+}
+
+struct FeedRow { cfg: FeedCfg, srcs: Vec<(String, f64, u64)>, outliers: Vec<String>, med: f64, halted: bool, degraded: bool }
+
+fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec<(u64, f64)>>, scache: &mut HashMap<String, SignCache>, bstate: &mut HashMap<String, (f64, u32)>) -> String {
     let ts = now(); let tms = now_ms();
     let signers: Vec<String> = keys.iter().map(|k| format!("\"{}\"", hex::encode(k.x_only_public_key().0.serialize()))).collect();
     let book = lp.lock().unwrap().clone();
-    let mut objs = Vec::new();
+
+    // ── pass 1: sources → MAD filter → median → circuit breaker ──
+    let mut rows: Vec<FeedRow> = Vec::new();
     for cfg in feeds() {
         let per = match book.get(&cfg.pair) { Some(m) => m, None => continue };
         let mut srcs: Vec<(&str, f64, u64)> = per.iter().filter(|(_, (_, t))| tms.saturating_sub(*t) < STALE_MS).map(|(n, (p, t))| (*n, *p, tms.saturating_sub(*t))).collect();
         if srcs.is_empty() { continue; }
         srcs.sort_by(|a, b| a.0.cmp(b.0));
-        let prices: Vec<f64> = srcs.iter().map(|(_, p, _)| *p).collect();
-        let med = median(&prices);
+        let outliers = mad_filter(&mut srcs);
+        let raw_med = median(&srcs.iter().map(|(_, p, _)| *p).collect::<Vec<_>>());
+        // breaker: a violent jump publishes the LAST GOOD price until it persists
+        let (med, halted) = match bstate.get(&cfg.pair).copied() {
+            Some((lg, n)) if lg > 0.0 && (raw_med - lg).abs() / lg > BREAK_PCT => {
+                if n + 1 >= BREAK_ROUNDS { bstate.insert(cfg.pair.clone(), (raw_med, 0)); (raw_med, false) }
+                else { bstate.insert(cfg.pair.clone(), (lg, n + 1)); (lg, true) }
+            }
+            _ => { bstate.insert(cfg.pair.clone(), (raw_med, 0)); (raw_med, false) }
+        };
+        let degraded = cfg.kind == "major" && srcs.len() < 2; // a major on one venue is low-confidence
+        rows.push(FeedRow { cfg, srcs: srcs.into_iter().map(|(n, p, a)| (n.to_string(), p, a)).collect(), outliers, med, halted, degraded });
+    }
+
+    // ── peg check: Igra's USDC feed should sit at ~$1.00 — drift means the
+    //    iKAS bridge (or USDC itself) depegged, so every Igra price is suspect ──
+    let usdc = rows.iter().find(|r| r.cfg.pair == "USDC/USD").map(|r| r.med);
+    let igra_peg_ok = usdc.map(|u| (u - 1.0).abs() < PEG_TOL);
+
+    // ── pass 2: sign the PUBLISHED price + render ──
+    let mut objs = Vec::new();
+    for r in &rows {
+        let med = r.med;
         let price_e8 = (med * 1e8).round() as u64; // informational only — the SIGNED price is mant×10^expo
         let (mant, expo) = mant_expo(med);
         // sign on CHANGE, re-sign unchanged prices only on the heartbeat
-        let (msg, sigs_json, signed_ts, signed_round) = match scache.get(&cfg.pair) {
+        let (msg, sigs_json, signed_ts, signed_round) = match scache.get(&r.cfg.pair) {
             Some(c) if c.mant == mant && c.expo == expo && ts.saturating_sub(c.ts) < HEARTBEAT_S =>
                 (c.msg.clone(), c.sigs_json.clone(), c.ts, c.round),
             _ => {
-                let msg = format!("kaspulse/v2|{}|{mant}|{expo}|{ts}|{round}", cfg.pair);
+                let msg = format!("kaspulse/v2|{}|{mant}|{expo}|{ts}|{round}", r.cfg.pair);
                 let sigs_json = keys.iter().map(|k| format!("\"{}\"", sign(k, &msg))).collect::<Vec<_>>().join(",");
-                scache.insert(cfg.pair.clone(), SignCache { mant, expo, msg: msg.clone(), sigs_json: sigs_json.clone(), ts, round });
+                scache.insert(r.cfg.pair.clone(), SignCache { mant, expo, msg: msg.clone(), sigs_json: sigs_json.clone(), ts, round });
                 (msg, sigs_json, ts, round)
             }
         };
+        let prices: Vec<f64> = r.srcs.iter().map(|(_, p, _)| *p).collect();
         let lo = prices.iter().cloned().fold(f64::MAX, f64::min); let hi = prices.iter().cloned().fold(f64::MIN, f64::max);
         let spread = if med > 0.0 { ((hi - lo) / med) * 10_000.0 } else { 0.0 };
-        let freshest = srcs.iter().map(|(_, _, a)| *a).min().unwrap_or(0);
+        let freshest = r.srcs.iter().map(|(_, _, a)| *a).min().unwrap_or(0);
         // deepest CURRENT venue liquidity (per-chain entries are overwritten each round — drained pools decay)
         let liq = { let lm = liq_map().lock().unwrap();
-            ["kasplex", "igra"].iter().filter_map(|c| lm.get(&format!("{}|{c}", cfg.pair))).cloned().fold(0.0_f64, f64::max) };
-        let thin = cfg.kind == "krc20" && liq < MIN_LIQ_WKAS; // low-liquidity pool → manipulable, low-confidence
-        let src_j: Vec<String> = srcs.iter().map(|(n, p, a)| format!(r#"{{"name":"{n}","price":{},"age_ms":{a}}}"#, enum_(*p))).collect();
-        let h = hist.entry(cfg.pair.clone()).or_default(); h.push((ts, med)); if h.len() > HISTORY { let d = h.len() - HISTORY; h.drain(0..d); }
+            ["kasplex", "igra"].iter().filter_map(|c| lm.get(&format!("{}|{c}", r.cfg.pair))).cloned().fold(0.0_f64, f64::max) };
+        let thin = r.cfg.kind == "krc20" && liq < MIN_LIQ_WKAS; // low-liquidity pool → manipulable, low-confidence
+        let src_j: Vec<String> = r.srcs.iter().map(|(n, p, a)| format!(r#"{{"name":"{n}","price":{},"age_ms":{a}}}"#, enum_(*p))).collect();
+        let out_j: Vec<String> = r.outliers.iter().map(|n| format!("\"{n}\"")).collect();
+        let peg_field = if r.srcs.iter().any(|(n, _, _)| n == "Igra-DEX") {
+            match igra_peg_ok { Some(ok) => format!(r#","peg_ok":{ok}"#), None => r#","peg_ok":null"#.to_string() }
+        } else { String::new() };
+        let h = hist.entry(r.cfg.pair.clone()).or_default(); h.push((ts, med)); if h.len() > HISTORY { let d = h.len() - HISTORY; h.drain(0..d); }
         let hist_j: Vec<String> = h.iter().map(|(t, p)| format!("[{t},{}]", enum_(*p))).collect();
         objs.push(format!(
-            r#"{{"pair":"{}","kind":"{}","price":{},"price_e8":{price_e8},"mant":{mant},"expo":{expo},"sources":[{}],"num_sources":{},"freshest_ms":{freshest},"low":{},"high":{},"spread_bps":{:.2},"median":{},"twap":true,"liq_wkas":{:.0},"thin":{thin},"signers":[{}],"threshold":{THRESHOLD},"signatures":[{}],"message":"{msg}","signed_ts":{signed_ts},"signed_round":{signed_round},"history":[{}]}}"#,
-            cfg.pair, cfg.kind, enum_(med), src_j.join(","), srcs.len(), enum_(lo), enum_(hi), spread, enum_(med), liq, signers.join(","), sigs_json, hist_j.join(",")
+            r#"{{"pair":"{}","kind":"{}","price":{},"price_e8":{price_e8},"mant":{mant},"expo":{expo},"sources":[{}],"num_sources":{},"outliers":[{}],"halted":{},"degraded":{}{peg_field},"freshest_ms":{freshest},"low":{},"high":{},"spread_bps":{:.2},"median":{},"twap":true,"liq_wkas":{:.0},"thin":{thin},"signers":[{}],"threshold":{THRESHOLD},"signatures":[{}],"message":"{msg}","signed_ts":{signed_ts},"signed_round":{signed_round},"history":[{}]}}"#,
+            r.cfg.pair, r.cfg.kind, enum_(med), src_j.join(","), r.srcs.len(), out_j.join(","), r.halted, r.degraded, enum_(lo), enum_(hi), spread, enum_(med), liq, signers.join(","), sigs_json, hist_j.join(",")
         ));
     }
-    format!(r#"{{"round":{round},"timestamp":{ts},"threshold":{THRESHOLD},"num_nodes":{N_NODES},"transport":"websocket","feeds":[{}]}}"#, objs.join(","))
+    let peg_j = format!(r#"{{"igra_usdc":{},"igra_ok":{}}}"#,
+        usdc.map(|u| format!("{u}")).unwrap_or_else(|| "null".into()),
+        igra_peg_ok.map(|b| b.to_string()).unwrap_or_else(|| "null".into()));
+    format!(r#"{{"round":{round},"timestamp":{ts},"threshold":{THRESHOLD},"num_nodes":{N_NODES},"transport":"websocket","peg":{peg_j},"feeds":[{}]}}"#, objs.join(","))
 }
 
 // ---------- http ----------
@@ -317,9 +370,9 @@ fn main() -> Result<()> {
     {
         let (feed, lp) = (feed.clone(), lp.clone());
         std::thread::spawn(move || {
-            let mut round = 1u64; let mut hist = HashMap::new(); let mut scache = HashMap::new();
+            let mut round = 1u64; let mut hist = HashMap::new(); let mut scache = HashMap::new(); let mut bstate = HashMap::new();
             loop {
-                let json = build(&lp, &keys, round, &mut hist, &mut scache);
+                let json = build(&lp, &keys, round, &mut hist, &mut scache, &mut bstate);
                 let _ = std::fs::write("web/feed.json", &json);
                 *feed.lock().unwrap() = json;
                 round += 1;

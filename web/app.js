@@ -49,8 +49,18 @@ function cardHtml(f) {
     <div class="fc-top"><span class="fc-pair">${esc(f.pair)}</span><span class="fc-tophead">${freshBadge(f.freshest_ms)}${tag}</span></div>
     <div class="fc-price ${dir}">${fmt(f.price)}</div>
     ${spark(f.history)}
-    <div class="fc-foot"><span>${f.num_sources} source${f.num_sources === 1 ? '' : 's'}</span><span class="fc-ok">✓ ${f.threshold}-of-${f.signatures.length} signed</span></div>
+    <div class="fc-foot"><span>${f.num_sources} source${f.num_sources === 1 ? '' : 's'}${warnBadges(f)}</span><span class="fc-ok">✓ ${f.threshold}-of-${f.signatures.length} signed</span></div>
   </div>`;
+}
+
+function warnBadges(f) {
+  const w = [];
+  if (f.halted) w.push('⏸ halted');
+  if (f.peg_ok === false) w.push('depeg');
+  if (f.degraded) w.push('degraded');
+  if (f.thin) w.push('thin');
+  if (f.outliers && f.outliers.length) w.push(`outlier: ${f.outliers.join(',')}`);
+  return w.map((x) => ` <span class="fc-warnb">${esc(x)}</span>`).join('');
 }
 
 function spark(hist) {

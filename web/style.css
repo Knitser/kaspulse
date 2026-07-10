@@ -147,3 +147,6 @@ a{color:inherit;text-decoration:none}
 .fresh-stat.fast{color:var(--green);font-weight:700}
 .d-age{font-size:10.5px;color:var(--faint);border:1px solid var(--line);border-radius:20px;padding:0 6px;margin-left:5px;font-family:var(--mono)}
 .d-age.fresh{color:var(--green);border-color:rgba(111,217,164,.35)}
+
+/* integrity badges */
+.fc-warnb{font-size:9.5px;font-family:var(--mono);color:var(--gold);border:1px solid rgba(255,212,121,.35);background:rgba(255,212,121,.07);border-radius:20px;padding:1px 6px;margin-left:4px}
