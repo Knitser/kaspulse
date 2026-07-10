@@ -91,13 +91,18 @@ exchange tick ──WS──▶ oracle signs ──SSE/WS──▶ consumer tx �
 - **tick → signed attestation: ~50-150ms** (our Bybit/Kraken WS measurements:
   first tick 48-334ms including connect; steady-state ticks every ~100-500ms)
 - **attestation → consumer: 10-50ms** (SSE/WS push, to build)
-- **consumer tx → in a block: ~one to a few 100ms-blocks.** Empirical TN10
-  number: `cargo run --bin latency --features onchain` measures
-  submit→UTXO-set-visible against a live node (tool ready; blocked on
-  re-fauceting the TN10 key — /tmp ate the old one).
-- **Net: market tick → real, verifiable data inside a Kaspa block in well under
-  ~1.5s, sub-second on a good path.** On Ethereum the same journey *starts* at
-  12s. Solana is the only comparable L1 — and it's PoS with a leader schedule.
+- **consumer tx → accepted in the UTXO set: MEASURED avg 1.39s on live TN10**
+  (`cargo run --bin latency --features onchain`, 3 rounds: 1510/1154/1507ms) —
+  **via a PUBLIC node through the resolver.** That number is dominated by
+  overhead we can remove: the submit RPC round-trip alone is ~310ms each way,
+  plus we only poll every 40ms and each poll is another RPC round-trip. The
+  actual block-inclusion is a fraction of it; a **co-located own node** (submit
+  straight to the DAG, subscribe to acceptance instead of polling) removes the
+  ~600ms+ of RPC hops and the poll latency.
+- **Net: market tick → real, verifiable data accepted on Kaspa in ~1.4s today
+  via a shared public node, and comfortably sub-second on an own-node path.**
+  On Ethereum the same journey *starts* at 12s; the price literally cannot land
+  faster. Solana is the only comparable L1 — and it's PoS with a leader schedule.
 
 ### The design, concretely
 1. **Pull-first (zero oracle-write latency):** every consumer covenant verifies
