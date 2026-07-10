@@ -188,7 +188,7 @@ into "the oracle Kaspa can actually trust."
 
 ---
 
-## Session completion (2026-07-10) — 9 of 11 items shipped, all with proof
+## Session completion (2026-07-10) — 10 of 11 items shipped, all with proof
 
 **Live on Kaspa TN10 (real txids):** signed-price publish, price-gated consumer,
 **3-of-5 threshold consumer** (fixes "cosmetic threshold"), and **equivocation
