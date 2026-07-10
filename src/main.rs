@@ -113,6 +113,22 @@ fn ws_bybit(lp: Live) {
             if let Some(px) = j["data"]["lastPrice"].as_str().and_then(|x| x.parse::<f64>().ok()) { set_price(lp, pair, "Bybit", px); }
         });
 }
+fn ws_okx(lp: Live) {
+    ws_loop("okx", "wss://ws.okx.com:8443/ws/v5/public",
+        r#"{"op":"subscribe","args":[{"channel":"tickers","instId":"KAS-USDT"},{"channel":"tickers","instId":"BTC-USDT"},{"channel":"tickers","instId":"ETH-USDT"}]}"#, &lp,
+        |j, lp| if let Some(arr) = j["data"].as_array() { for d in arr {
+            let pair = match d["instId"].as_str() { Some("KAS-USDT") => "KAS/USD", Some("BTC-USDT") => "BTC/USD", Some("ETH-USDT") => "ETH/USD", _ => continue };
+            if let Some(px) = d["last"].as_str().and_then(|x| x.parse::<f64>().ok()) { set_price(lp, pair, "OKX", px); }
+        } });
+}
+fn ws_coinbase(lp: Live) { // BTC/ETH only — Coinbase doesn't list KAS
+    ws_loop("coinbase", "wss://ws-feed.exchange.coinbase.com",
+        r#"{"type":"subscribe","product_ids":["BTC-USD","ETH-USD"],"channels":["ticker"]}"#, &lp,
+        |j, lp| if j["type"] == "ticker" {
+            let pair = match j["product_id"].as_str() { Some("BTC-USD") => "BTC/USD", Some("ETH-USD") => "ETH/USD", _ => return };
+            if let Some(px) = j["price"].as_str().and_then(|x| x.parse::<f64>().ok()) { set_price(lp, pair, "Coinbase", px); }
+        });
+}
 
 // ---------- slow REST + KRC-20 (adds sources + the tokens) ----------
 fn agent() -> ureq::Agent { ureq::AgentBuilder::new().timeout(Duration::from_secs(7)).build() }
@@ -365,7 +381,7 @@ fn main() -> Result<()> {
     println!("serving http://127.0.0.1:{PORT}");
 
     let lp: Live = Arc::new(Mutex::new(HashMap::new()));
-    for (f, lpc) in [ws_kraken as fn(Live), ws_bybit, slow_thread].into_iter().zip(std::iter::repeat(lp.clone())) {
+    for (f, lpc) in [ws_kraken as fn(Live), ws_bybit, ws_okx, ws_coinbase, slow_thread].into_iter().zip(std::iter::repeat(lp.clone())) {
         std::thread::spawn(move || f(lpc));
     }
 
