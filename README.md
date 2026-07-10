@@ -96,26 +96,32 @@ You can point it at any feed URL: `cargo run --bin verify -- <url>`.
 
 ## The API
 
-`GET /api/feed` returns:
+`GET /api/feed` returns all feeds; `GET /api/feed/KAS-USD` one:
 ```json
 {
-  "pair": "KAS/USD",
-  "price": 0.029123,
-  "price_e8": 2912300,
-  "round": 131,
-  "timestamp": 1783588006,
-  "sources": [{"name":"Kraken","price":0.02911}, ...],
-  "median": 0.029123,
-  "spread_bps": 13.7,
-  "signers":  ["<node0 pubkey>", ...5],
-  "threshold": 3,
-  "signatures": ["<schnorr sig>", ...5],
-  "message": "kaspulse/v1|KAS/USD|2912300|1783588006|131",
-  "history": [[ts, price], ...]
+  "round": 131, "timestamp": 1783588006, "threshold": 3, "num_nodes": 5,
+  "transport": "websocket",
+  "feeds": [{
+    "pair": "KAS/USD", "kind": "major",
+    "price": 0.029123,
+    "mant": 291230000, "expo": -10,
+    "sources": [{"name":"Kraken","price":0.02911,"age_ms":712}, ...],
+    "freshest_ms": 712, "spread_bps": 13.7, "median": 0.029123,
+    "twap": true, "liq_wkas": 0, "thin": false,
+    "signers": ["<node pubkey>", ...5], "threshold": 3,
+    "signatures": ["<schnorr sig>", ...5],
+    "message": "kaspulse/v2|KAS/USD|291230000|-10|1783588006|131",
+    "signed_ts": 1783588006, "signed_round": 131,
+    "history": [[ts, price], ...]
+  }, ...]
 }
 ```
-A consumer verifies `schnorr_verify(signature, blake2b(message), signer)` for a
-threshold of signers.
+The **signed price is `mant × 10^expo`** (9 significant digits at any magnitude —
+a $3e-9 meme token signs as precisely as BTC). Message format:
+`kaspulse/v2|PAIR|mant|expo|ts|round`; a consumer verifies
+`schnorr_verify(signature, blake2b(message), signer)` for a threshold of
+signers. Unchanged prices re-sign on a 5s heartbeat; changed prices sign
+immediately (`signed_ts` tells you which attestation you hold).
 
 ---
 

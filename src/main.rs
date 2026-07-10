@@ -26,6 +26,7 @@ const THRESHOLD: usize = 3;
 const SERVE_MS: u64 = 400;    // re-sign + serve cadence
 const STALE_MS: u64 = 30_000; // drop a source's price if older than this (KRC-20 pools refresh every few s)
 const SLOW_EVERY: u64 = 5;    // REST/KRC-20 refresh (seconds)
+const HEARTBEAT_S: u64 = 5;   // re-sign an UNCHANGED price at most this often (changed prices sign immediately)
 
 fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() }
 fn now_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 }
@@ -70,22 +71,26 @@ fn feeds() -> Vec<FeedCfg> {
 
 // ---------- WebSocket streams (sub-second) ----------
 fn ws_loop(name: &str, url: &str, sub: &str, lp: &Live, handle: impl Fn(&serde_json::Value, &Live)) {
+    let mut fails: u32 = 0;
     loop {
-        let r = (|| -> Result<()> {
-            let (mut s, _) = connect(url)?;
-            s.write_message(Message::Text(sub.to_string()))?;
-            loop {
-                match s.read_message()? {
-                    Message::Text(t) => { if let Ok(j) = serde_json::from_str::<serde_json::Value>(&t) { handle(&j, lp); } }
-                    Message::Ping(p) => s.write_message(Message::Pong(p))?,
-                    Message::Close(_) => break,
-                    _ => {}
+        match connect(url) {
+            Ok((mut s, _)) => {
+                fails = 0;
+                let _ = s.write_message(Message::Text(sub.to_string()));
+                loop {
+                    match s.read_message() {
+                        Ok(Message::Text(t)) => { if let Ok(j) = serde_json::from_str::<serde_json::Value>(&t) { handle(&j, lp); } }
+                        Ok(Message::Ping(p)) => { let _ = s.write_message(Message::Pong(p)); }
+                        Ok(Message::Close(_)) => break,
+                        Ok(_) => {}
+                        Err(e) => { eprintln!("{name} ws read error: {e} — reconnecting"); break; }
+                    }
                 }
             }
-            Ok(())
-        })();
-        if let Err(e) = r { eprintln!("{name} ws down: {e} — reconnecting"); }
-        std::thread::sleep(Duration::from_secs(3));
+            Err(e) => { fails += 1; eprintln!("{name} ws connect failed: {e}"); }
+        }
+        // exponential backoff (2s → 30s) so repeated failures don't hammer the exchange
+        std::thread::sleep(Duration::from_secs((2u64 << fails.min(4)).min(30)));
     }
 }
 fn ws_kraken(lp: Live) {
@@ -154,8 +159,15 @@ fn pool_read(rpcs: &[String], p: &Pool) -> Option<(f64, f64)> { // (price_in_wka
     Some(((rw / 1e18) / (rt / 10f64.powi(p.dec as i32)), rw / 1e18)) // (WKAS price, WKAS liquidity)
 }
 fn kas_usd(lp: &Live) -> f64 {
+    // median of FRESH sources only — a frozen venue must not keep voting on the
+    // KAS/USD that multiplies every KRC-20 price
+    let tms = now_ms();
     match lp.lock().unwrap().get("KAS/USD") {
-        Some(m) => { let mut v: Vec<f64> = m.values().map(|(p, _)| *p).collect(); v.sort_by(|a, b| a.partial_cmp(b).unwrap()); if v.is_empty() { 0.0 } else { v[v.len() / 2] } }
+        Some(m) => {
+            let mut v: Vec<f64> = m.values().filter(|(_, t)| tms.saturating_sub(*t) < STALE_MS).map(|(p, _)| *p).collect();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            if v.is_empty() { 0.0 } else { v[v.len() / 2] }
+        }
         None => 0.0,
     }
 }
@@ -190,8 +202,9 @@ fn slow_thread(lp: Live) {
                         let w = win.entry(format!("{pair}|{chain}")).or_default(); // window per (pair, chain)
                         w.push(px_kas * ku); if w.len() > TWAP_N { let d = w.len() - TWAP_N; w.drain(0..d); }
                         set_price(&lp, &pair, dex_source(chain), median(w));
-                        let mut lm = liq_map().lock().unwrap();
-                        let e = lm.entry(pair).or_insert(0.0); if liq > *e { *e = liq; } // max liq across venues
+                        // store CURRENT liquidity per (pair, chain) — overwritten every
+                        // round so a drained pool loses its 'liquid' status immediately
+                        liq_map().lock().unwrap().insert(format!("{pair}|{chain}"), liq);
                     }
                 }
             }
@@ -211,7 +224,20 @@ fn load_keys(n: usize) -> Vec<Keypair> {
 fn sign(kp: &Keypair, msg: &str) -> String { let h = blake2b_simd::Params::new().hash_length(32).hash(msg.as_bytes()); hex::encode(kp.sign_schnorr(secp256k1::Message::from_digest_slice(h.as_bytes()).unwrap()).as_ref()) }
 fn enum_(p: f64) -> String { if p == 0.0 { "0".into() } else { format!("{p}") } }
 
-fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec<(u64, f64)>>) -> String {
+/// The signed representation: price = mant × 10^expo, mant always 9 significant
+/// digits. Fixes the price_e8 quantization bug (a $3e-9 token signed as 0).
+fn mant_expo(p: f64) -> (u64, i32) {
+    if p <= 0.0 || !p.is_finite() { return (0, 0); }
+    let mut expo = p.log10().floor() as i32 - 8;
+    let mut mant = (p / 10f64.powi(expo)).round() as u64;
+    if mant >= 1_000_000_000 { mant /= 10; expo += 1; } // rounding carried into a 10th digit
+    (mant, expo)
+}
+/// last signed attestation per pair — unchanged prices re-sign only on the
+/// heartbeat, so signing cost tracks price CHANGES, not the serve loop.
+struct SignCache { mant: u64, expo: i32, msg: String, sigs_json: String, ts: u64, round: u64 }
+
+fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec<(u64, f64)>>, scache: &mut HashMap<String, SignCache>) -> String {
     let ts = now(); let tms = now_ms();
     let signers: Vec<String> = keys.iter().map(|k| format!("\"{}\"", hex::encode(k.x_only_public_key().0.serialize()))).collect();
     let book = lp.lock().unwrap().clone();
@@ -223,20 +249,32 @@ fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec
         srcs.sort_by(|a, b| a.0.cmp(b.0));
         let prices: Vec<f64> = srcs.iter().map(|(_, p, _)| *p).collect();
         let med = median(&prices);
-        let price_e8 = (med * 1e8).round() as u64;
-        let msg = format!("kaspulse/v1|{}|{}|{}|{}", cfg.pair, price_e8, ts, round);
-        let sigs: Vec<String> = keys.iter().map(|k| format!("\"{}\"", sign(k, &msg))).collect();
+        let price_e8 = (med * 1e8).round() as u64; // informational only — the SIGNED price is mant×10^expo
+        let (mant, expo) = mant_expo(med);
+        // sign on CHANGE, re-sign unchanged prices only on the heartbeat
+        let (msg, sigs_json, signed_ts, signed_round) = match scache.get(&cfg.pair) {
+            Some(c) if c.mant == mant && c.expo == expo && ts.saturating_sub(c.ts) < HEARTBEAT_S =>
+                (c.msg.clone(), c.sigs_json.clone(), c.ts, c.round),
+            _ => {
+                let msg = format!("kaspulse/v2|{}|{mant}|{expo}|{ts}|{round}", cfg.pair);
+                let sigs_json = keys.iter().map(|k| format!("\"{}\"", sign(k, &msg))).collect::<Vec<_>>().join(",");
+                scache.insert(cfg.pair.clone(), SignCache { mant, expo, msg: msg.clone(), sigs_json: sigs_json.clone(), ts, round });
+                (msg, sigs_json, ts, round)
+            }
+        };
         let lo = prices.iter().cloned().fold(f64::MAX, f64::min); let hi = prices.iter().cloned().fold(f64::MIN, f64::max);
         let spread = if med > 0.0 { ((hi - lo) / med) * 10_000.0 } else { 0.0 };
         let freshest = srcs.iter().map(|(_, _, a)| *a).min().unwrap_or(0);
-        let liq = liq_map().lock().unwrap().get(&cfg.pair).copied().unwrap_or(0.0);
+        // deepest CURRENT venue liquidity (per-chain entries are overwritten each round — drained pools decay)
+        let liq = { let lm = liq_map().lock().unwrap();
+            ["kasplex", "igra"].iter().filter_map(|c| lm.get(&format!("{}|{c}", cfg.pair))).cloned().fold(0.0_f64, f64::max) };
         let thin = cfg.kind == "krc20" && liq < MIN_LIQ_WKAS; // low-liquidity pool → manipulable, low-confidence
         let src_j: Vec<String> = srcs.iter().map(|(n, p, a)| format!(r#"{{"name":"{n}","price":{},"age_ms":{a}}}"#, enum_(*p))).collect();
         let h = hist.entry(cfg.pair.clone()).or_default(); h.push((ts, med)); if h.len() > HISTORY { let d = h.len() - HISTORY; h.drain(0..d); }
         let hist_j: Vec<String> = h.iter().map(|(t, p)| format!("[{t},{}]", enum_(*p))).collect();
         objs.push(format!(
-            r#"{{"pair":"{}","kind":"{}","price":{},"price_e8":{price_e8},"sources":[{}],"num_sources":{},"freshest_ms":{freshest},"low":{},"high":{},"spread_bps":{:.2},"median":{},"twap":true,"liq_wkas":{:.0},"thin":{thin},"signers":[{}],"threshold":{THRESHOLD},"signatures":[{}],"message":"{msg}","history":[{}]}}"#,
-            cfg.pair, cfg.kind, enum_(med), src_j.join(","), srcs.len(), enum_(lo), enum_(hi), spread, enum_(med), liq, signers.join(","), sigs.join(","), hist_j.join(",")
+            r#"{{"pair":"{}","kind":"{}","price":{},"price_e8":{price_e8},"mant":{mant},"expo":{expo},"sources":[{}],"num_sources":{},"freshest_ms":{freshest},"low":{},"high":{},"spread_bps":{:.2},"median":{},"twap":true,"liq_wkas":{:.0},"thin":{thin},"signers":[{}],"threshold":{THRESHOLD},"signatures":[{}],"message":"{msg}","signed_ts":{signed_ts},"signed_round":{signed_round},"history":[{}]}}"#,
+            cfg.pair, cfg.kind, enum_(med), src_j.join(","), srcs.len(), enum_(lo), enum_(hi), spread, enum_(med), liq, signers.join(","), sigs_json, hist_j.join(",")
         ));
     }
     format!(r#"{{"round":{round},"timestamp":{ts},"threshold":{THRESHOLD},"num_nodes":{N_NODES},"transport":"websocket","feeds":[{}]}}"#, objs.join(","))
@@ -279,9 +317,9 @@ fn main() -> Result<()> {
     {
         let (feed, lp) = (feed.clone(), lp.clone());
         std::thread::spawn(move || {
-            let mut round = 1u64; let mut hist = HashMap::new();
+            let mut round = 1u64; let mut hist = HashMap::new(); let mut scache = HashMap::new();
             loop {
-                let json = build(&lp, &keys, round, &mut hist);
+                let json = build(&lp, &keys, round, &mut hist, &mut scache);
                 let _ = std::fs::write("web/feed.json", &json);
                 *feed.lock().unwrap() = json;
                 round += 1;

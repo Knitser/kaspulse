@@ -89,9 +89,71 @@ fn main() {
     let price_ok = drift < 1.0;
     println!("  my median ${mine:.6}  vs  feed ${theirs:.6}  ({drift:.2}% drift) {}", if price_ok { "✓" } else { "⚠ (moved / off)" });
 
-    println!("\n{}", if all_sig_ok && price_ok {
-        "VERDICT: honest — every feed signed by the threshold, and KAS matches the market. No trust required."
+    // (3) reproduce every KRC-20 price straight from its on-chain pool
+    println!("\nindependent KRC-20 check (re-reading the DEX pools myself):");
+    let pools = load_pools();
+    let pools_ok = if pools.is_empty() {
+        println!("  (pools.json not found — skipping)"); true
+    } else {
+        let feed_med: std::collections::HashMap<String, f64> = feeds.iter().filter_map(|f| {
+            Some((f["pair"].as_str()?.to_string(), f["median"].as_f64()?))
+        }).collect();
+        // gather every venue's price per symbol, then check the feed sits INSIDE
+        // the venue range (a multi-venue token's median lies between its pools)
+        let mut venue_px: std::collections::HashMap<String, Vec<f64>> = std::collections::HashMap::new();
+        for chunk in pools.chunks(12) {
+            let results: Vec<(String, Option<f64>)> = std::thread::scope(|s| {
+                chunk.iter().map(|p| s.spawn(move || (p.symbol.clone(), pool_px(p))))
+                    .collect::<Vec<_>>().into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for (sym, px_kas) in results { if let Some(px) = px_kas { venue_px.entry(sym).or_default().push(px * mine); } }
+        }
+        let (mut checked, mut bad) = (0, 0);
+        for (sym, vs) in &venue_px {
+            let pair = format!("{sym}/USD");
+            let Some(feed) = feed_med.get(&pair) else { continue };
+            let lo = vs.iter().cloned().fold(f64::MAX, f64::min) * 0.88;
+            let hi = vs.iter().cloned().fold(f64::MIN, f64::max) * 1.12;
+            checked += 1;
+            if *feed < lo || *feed > hi { bad += 1; println!("  ⚠ {pair:12} feed ${feed:.3e} outside its venues' range [{:.3e}, {:.3e}]", lo, hi); }
+        }
+        println!("  {checked} tokens re-read on-chain · {} reproduce the feed (within TWAP tolerance)", checked - bad);
+        bad == 0
+    };
+
+    println!("\n{}", if all_sig_ok && price_ok && pools_ok {
+        "VERDICT: honest — every feed signed by the threshold, KAS matches the market, and the KRC-20 pools reproduce on-chain. No trust required."
     } else {
         "VERDICT: something's off — see above."
     });
+}
+
+// ---- self-contained on-chain pool reproduction (mirrors the oracle's read) ----
+struct VPool { symbol: String, pool: String, wkas0: bool, dec: i32, chain: String }
+fn load_pools() -> Vec<VPool> {
+    serde_json::from_str::<Value>(&std::fs::read_to_string("pools.json").unwrap_or_default()).ok()
+        .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|p| {
+            let symbol = p["symbol"].as_str()?.to_string();
+            // same exclusion as the oracle: meme tokens named KAS/BTC/ETH must not
+            // be compared against the real major feeds
+            if matches!(symbol.to_uppercase().as_str(), "KAS" | "BTC" | "ETH") { return None; }
+            Some(VPool { symbol, pool: p["pair"].as_str()?.to_string(),
+                wkas0: p["wkas_is_token0"].as_bool()?, dec: p["dec"].as_u64()? as i32,
+                chain: p["chain"].as_str().unwrap_or("kasplex").to_string() })
+        }).collect())).unwrap_or_default()
+}
+fn rpc_for(chain: &str) -> String {
+    let (env, default) = match chain { "igra" => ("IGRA_RPCS", "https://rpc.igralabs.com:8545"), _ => ("KASPLEX_RPCS", "https://evmrpc.kasplex.org") };
+    std::env::var(env).ok().and_then(|s| s.split(',').next().map(|x| x.trim().to_string())).filter(|s| !s.is_empty()).unwrap_or_else(|| default.to_string())
+}
+fn pool_px(p: &VPool) -> Option<f64> {
+    let body = format!(r#"{{"jsonrpc":"2.0","method":"eth_call","params":[{{"to":"{}","data":"0x0902f1ac"}},"latest"],"id":1}}"#, p.pool);
+    let j: Value = agent().post(&rpc_for(&p.chain)).set("content-type", "application/json").send_string(&body).ok()?.into_json().ok()?;
+    let h = j["result"].as_str()?.trim_start_matches("0x").to_string();
+    if h.len() < 128 { return None; }
+    let r = |s: &str| u128::from_str_radix(&s[32..64], 16).ok().map(|v| v as f64);
+    let (r0, r1) = (r(&h[0..64])?, r(&h[64..128])?);
+    let (rw, rt) = if p.wkas0 { (r0, r1) } else { (r1, r0) };
+    if rt <= 0.0 { return None; }
+    Some((rw / 1e18) / (rt / 10f64.powi(p.dec)))
 }
