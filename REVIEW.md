@@ -206,11 +206,12 @@ daemon (real operator separation, 3 proven); deploy-ready packaging;
   robust feed needs u256 UQ112x112 + block-timestamp extrapolation. Lower
   priority: the sampled windowed-median TWAP already defeats single-block flash
   loans, and sustained multi-block manipulation is expensive + arbitraged.
-- **#11 zkOracle** — proving "the published median = median(signed source
-  prices)" in ZK, verified on-chain via KIP-16. The building blocks are PROVEN
-  (kasphinx generates Groth16 proofs Kaspa's precompile accepts, live on TN10);
-  the median circuit (a sorting network in gr1cs) is the remaining research.
-  This is the moat nobody else on Kaspa can build without our ZK toolchain.
+- **#11 zkOracle** — DONE (PoC): `kasphinx/src/zkmedian.rs` proves the
+  published price is the correct MEDIAN of 5 PRIVATE sources (median-of-5 via
+  range-checked comparison counting), Groth16 verified through Kaspa's KIP-16
+  precompile; honest median ACCEPTED, lies REJECTED. Confidential-source
+  aggregation, verifiable on Kaspa L1 — the moat, working. Production scaling
+  (N sources, in the live signing loop) is the remaining engineering.
 
 **Net:** kaspulse went from "a signed price feed" to a multi-chain, self-
 discovering, guarded, threshold-signed oracle with an SDK, real operator
