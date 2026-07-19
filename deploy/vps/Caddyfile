@@ -1,0 +1,7 @@
+# Caddyfile template for the kaspulse VPS — installed by deploy-vps.sh
+# __SSLIP_HOST__ is the VPS IP in dash form + .sslip.io (e.g. 203-0-113-7.sslip.io);
+# Caddy provisions a free Let's Encrypt/ZeroSSL certificate for it automatically.
+__SSLIP_HOST__ {
+	encode gzip
+	reverse_proxy 127.0.0.1:8080
+}

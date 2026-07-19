@@ -116,7 +116,10 @@ fn safe_key(k: &str) -> bool {
 
 // ---------- server ----------
 pub fn run(port: u16, state: Arc<PubState>) -> std::io::Result<()> {
-    let listener = TcpListener::bind(("0.0.0.0", port))?;
+    // KASPULSE_BIND=127.0.0.1 keeps the oracle loopback-only behind a local
+    // reverse proxy (the VPS deploy); default stays 0.0.0.0.
+    let bind = std::env::var("KASPULSE_BIND").unwrap_or_else(|_| "0.0.0.0".into());
+    let listener = TcpListener::bind((bind.as_str(), port))?;
     let conns = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         let Ok(mut s) = stream else { continue };

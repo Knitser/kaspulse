@@ -1,0 +1,13 @@
+# Cloud Run proxy — forwards kaspulse.web.app traffic to the VPS oracle.
+# BACKEND_HOST is the VPS's sslip.io hostname (set at deploy time).
+{
+	auto_https off
+	admin off
+}
+
+:{$PORT:8080} {
+	encode gzip
+	reverse_proxy https://{$BACKEND_HOST} {
+		header_up Host {$BACKEND_HOST}
+	}
+}

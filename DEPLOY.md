@@ -1,11 +1,42 @@
 # Deploying kaspulse
 
 The `oracle` binary serves BOTH the dashboard and the JSON API on `$PORT`
-(default 8080, binds `0.0.0.0`), so one container is the whole public service:
-one stateful singleton (live exchange WebSockets + the in-memory signing
-state) that must run 24/7. Topology: a single Cloud Run service in
-`europe-west4`, `--min-instances 1 --max-instances 1` (the max is the budget
-guard), on the `*.run.app` URL until a domain is chosen.
+(default 8080; `KASPULSE_BIND=127.0.0.1` for loopback-only behind a local
+proxy), so one process is the whole public service: one stateful singleton
+(live exchange WebSockets + the in-memory signing state) that must run 24/7.
+
+## ACTIVE topology (chosen 2026-07-19): VPS + kaspulse.web.app
+
+The oracle runs on a VPS; the public URL is **https://kaspulse.web.app**
+(Firebase Hosting site `kaspulse` in `kascov-explorer`, already created).
+Hosting can only rewrite to Cloud Run, so a scale-to-zero Caddy proxy
+bridges to the VPS:
+
+```
+kaspulse.web.app → Cloud Run kaspulse-proxy (min-instances 0, pennies)
+                 → https://<ip-dashes>.sslip.io (Caddy on the VPS, free LE TLS)
+                 → 127.0.0.1:8080 (oracle, systemd, KASPULSE_REQUIRE_KEYS=1)
+```
+
+Three idempotent scripts, run in order from the repo root (the machine
+holding the committee key files):
+
+```sh
+./deploy/vps/deploy-vps.sh user@host        # build + keys + systemd + caddy
+./deploy/proxy/deploy-proxy.sh <sslip-host> # printed by the previous step
+./deploy/hosting/deploy-hosting.sh          # points kaspulse.web.app at it
+```
+
+Committee keys travel by `scp` in step 1 (never through git); the systemd
+unit sets `BASE_URL=https://kaspulse.web.app` so share/OG/sitemap links are
+branded. Re-run step 1 to update after a `git push`; re-run step 2 only if
+the VPS IP changes.
+
+---
+
+The sections below are the ALTERNATIVE all-Cloud-Run topology (single
+service, `--min-instances 1 --max-instances 1` as the budget guard) — kept
+for when the oracle outgrows the VPS.
 
 ## 1. One-time: committee keys → Secret Manager (deploy blocker)
 
@@ -23,18 +54,11 @@ The deploy runs with `KASPULSE_REQUIRE_KEYS=1` and the secret injected as
 the exact token `KASPULSE_KEYS_MISSING` and exits 1 instead of silently
 minting a fresh committee.
 
-## 2. One-time: publish the GitHub repo (deploy blocker)
+## 2. One-time: publish the GitHub repo — DONE 2026-07-19
 
-The site and docs link `github.com/Knitser/kaspulse` in ~11 places — the
-nav/footer, both docs-hub cards, the `#/dev` quickstart `curl`s against
-`raw.githubusercontent.com` (the ONLY download path for the zero-dep
-clients), and the SDK's git-dependency install snippet. That repo does not
-exist yet, so every one of those links 404s until it is published (or the
-slug is corrected everywhere).
-
-Before pushing it public: `*.key` is gitignored and no key file is tracked
-(verified with `git ls-files`), but re-check — `kaspulse-node-{0..4}.key` sit
-in the repo root and must never leave this machine.
+`github.com/Knitser/kaspulse` is live and public; all ~11 site/docs links
+resolve. (Pre-push key check was run: `*.key` gitignored, none tracked, none
+anywhere in history.)
 
 ## 3. Every deploy
 

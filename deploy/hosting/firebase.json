@@ -1,0 +1,13 @@
+{
+  "hosting": {
+    "site": "kaspulse",
+    "public": "public",
+    "cleanUrls": true,
+    "rewrites": [
+      {
+        "source": "**",
+        "run": { "serviceId": "kaspulse-proxy", "region": "europe-west4" }
+      }
+    ]
+  }
+}

@@ -1,0 +1,26 @@
+# systemd unit for the kaspulse oracle — installed by deploy-vps.sh
+# (placeholders __APP_DIR__ are filled in by the script)
+[Unit]
+Description=kaspulse oracle — covenant-ready price feeds for Kaspa L1
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=kaspulse
+Group=kaspulse
+WorkingDirectory=__APP_DIR__
+ExecStart=__APP_DIR__/target/release/oracle
+Environment=PORT=8080
+Environment=KASPULSE_BIND=127.0.0.1
+Environment=KASPULSE_REQUIRE_KEYS=1
+Environment=BASE_URL=https://kaspulse.web.app
+Restart=always
+RestartSec=3
+# the oracle holds live exchange WebSockets — give it time to drain on stop
+TimeoutStopSec=10
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=__APP_DIR__
+
+[Install]
+WantedBy=multi-user.target
