@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>An oracle-gated covenant on Kaspa testnet-10 in 15 minutes — kaspulse</title>
+  <meta name="description" content="A tested, end-to-end walkthrough: fetch a threshold-signed price from kaspulse, verify it three ways, lock TKAS behind a price-gate covenant on Kaspa testnet-10, and spend it — with Kaspa L1 script verifying the committee signatures at spend time. Includes the four traps that stop most first runs.">
+  <meta property="og:title" content="An oracle-gated covenant on Kaspa testnet-10 in 15 minutes">
+  <meta property="og:description" content="Fetch a signed price, verify it yourself, then make Kaspa L1 enforce it: a price-gated covenant deployed and spent on testnet-10 — every command real, traps included.">
+  <meta property="og:type" content="article">
+  <!-- root-relative on disk; the server absolutizes content="/og…" via BASE_URL -->
+  <meta property="og:image" content="/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="An oracle-gated covenant on Kaspa testnet-10 in 15 minutes">
+  <meta name="twitter:image" content="/og.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    /* self-contained: kaspulse's dark look, tokens copied from web/style.css */
+    :root {
+      color-scheme: dark;
+      --bg: #080b11;
+      --panel: #0e131c;
+      --panel2: #131a26;
+      --line: #1e2836;
+      --text: #e8eef7;
+      --muted: #93a2b8;
+      --faint: #5f6f85;
+      --teal: #49eacb;
+      --teal-soft: rgba(73, 234, 203, 0.10);
+      --green: #6fd9a4;
+      --gold: #ffd479;
+      --gold-soft: rgba(255, 212, 121, 0.09);
+      --red: #ff7a8a;
+      --violet: #c792ea;
+      --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+      --sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+      --radius: 16px;
+      --radius-sm: 10px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(70% 55% at 78% -5%, rgba(73, 234, 203, 0.10), transparent 60%),
+        radial-gradient(60% 45% at 12% 0%, rgba(111, 217, 164, 0.07), transparent 55%),
+        var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    .container { width: min(1120px, 100% - 2.5rem); margin-inline: auto; }
+    a { color: var(--teal); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    header.site {
+      position: sticky; top: 0; z-index: 10;
+      padding: 0.9rem 0;
+      border-bottom: 1px solid var(--line);
+      background: rgba(8, 11, 17, 0.88);
+      backdrop-filter: blur(8px);
+    }
+    .wordmark { font-weight: 800; letter-spacing: -0.02em; color: var(--teal); font-size: 1.1rem; }
+    .wordmark .sigil { color: var(--teal); }
+    .crumb { color: var(--faint); font-size: 0.9rem; font-family: var(--mono); }
+    h1 { font-size: clamp(1.6rem, 4.5vw, 2.4rem); line-height: 1.15; margin: 1.8rem 0 0.6rem; letter-spacing: -0.02em; font-weight: 800; }
+    .lead { color: var(--muted); font-size: 1.06rem; max-width: 68ch; }
+    .honest {
+      margin: 1.2rem 0 0;
+      padding: 0.8rem 1.05rem;
+      border: 1px solid rgba(73, 234, 203, 0.35);
+      border-radius: var(--radius-sm);
+      background: var(--teal-soft);
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+    .honest strong { color: var(--text); }
+    .layout { display: grid; grid-template-columns: 1fr; gap: 0 2.5rem; margin-top: 1.4rem; }
+    @media (min-width: 1120px) {
+      .layout { grid-template-columns: minmax(0, 1fr) 250px; }
+      .toc { position: sticky; top: 4.2rem; align-self: start; order: 2; }
+      article.steps { order: 1; }
+    }
+    .toc {
+      margin: 0 0 1rem;
+      padding: 0.9rem 1.1rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: linear-gradient(180deg, var(--panel), var(--panel2));
+      font-size: 0.92rem;
+    }
+    .toc ol { margin: 0.3rem 0 0 1.1rem; padding: 0; }
+    .toc li { margin: 0.18rem 0; color: var(--muted); }
+    h2 { font-size: 1.35rem; margin: 2.6rem 0 0.5rem; letter-spacing: -0.01em; }
+    h2 .stepno { color: var(--teal); font-family: var(--mono); font-size: 0.95rem; margin-right: 0.55rem; }
+    h3 { font-size: 1.05rem; margin: 1.6rem 0 0.4rem; }
+    p, li { color: var(--muted); }
+    p strong, li strong { color: var(--text); }
+    code { font-family: var(--mono); font-size: 0.86em; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 0.08em 0.35em; word-break: break-word; }
+    pre {
+      position: relative;
+      background: linear-gradient(180deg, var(--panel), var(--panel2));
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      padding: 0.9rem 1rem;
+      overflow-x: auto;
+      font-family: var(--mono);
+      font-size: 0.82rem;
+      line-height: 1.55;
+      color: var(--text);
+    }
+    pre code { background: none; border: none; padding: 0; font-size: 1em; }
+    pre .c { color: var(--faint); }        /* comment */
+    pre .o { color: var(--green); }        /* output line, as captured */
+    pre .e { color: var(--red); }          /* error / highlight line */
+    .runlabel {
+      font: 600 0.72rem var(--mono);
+      color: var(--faint);
+      letter-spacing: 0.05em;
+      margin: 1rem 0 -0.5rem;
+    }
+    .runlabel.live { color: var(--green); }
+    .copy-btn {
+      position: absolute;
+      top: 0.5rem; right: 0.5rem;
+      font: 600 0.72rem var(--sans);
+      color: var(--muted);
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 0.25rem 0.6rem;
+      cursor: pointer;
+    }
+    .copy-btn:hover { color: var(--text); border-color: rgba(73, 234, 203, 0.35); }
+    .callout {
+      border: 1px solid var(--line);
+      border-left: 3px solid var(--teal);
+      border-radius: var(--radius-sm);
+      background: var(--panel);
+      padding: 0.9rem 1.1rem;
+      margin: 1.1rem 0;
+      font-size: 0.95rem;
+    }
+    .callout.trap { border-left-color: var(--gold); background: var(--gold-soft); }
+    .callout p { margin: 0.4rem 0; }
+    table { border-collapse: collapse; width: 100%; margin: 0.8rem 0; font-size: 0.88rem; }
+    th, td { text-align: left; padding: 0.45rem 0.7rem; border-bottom: 1px solid var(--line); color: var(--muted); vertical-align: top; }
+    th { color: var(--text); font-weight: 600; }
+    td code { white-space: nowrap; }
+    .table-scroll { overflow-x: auto; }
+    footer { margin: 3.5rem 0 2rem; padding-top: 1.2rem; border-top: 1px solid var(--line); color: var(--faint); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <header class="site">
+    <div class="container">
+      <a class="wordmark" href="/"><span class="sigil">⧫</span> kaspulse</a>
+      <span class="crumb"> · builder guide</span>
+    </div>
+  </header>
+
+  <main class="container">
+    <h1>An oracle-gated covenant on Kaspa testnet-10 in 15 minutes</h1>
+    <p class="lead">
+      The working end-to-end path: fetch a <strong>threshold-signed price</strong> from kaspulse,
+      verify it yourself three ways (browser → one-file client → full re-derivation), then make
+      Kaspa L1 <em>enforce</em> it — lock TKAS behind a covenant that releases only when the
+      committee signed the price <em>and</em> the price clears your strike, and spend it. Along the
+      way: the four traps that stop most first runs.
+    </p>
+    <div class="honest" id="honest">
+      <strong>Read this before you start.</strong> Every command below is real: the oracle outputs
+      on this page were captured from live runs in July 2026, and the covenant and slashing flows
+      are the same code this repo proved on testnet-10 (<code>consumer_live</code>,
+      <code>slash_live</code>). Testnet runs are ephemeral, so no stale txids are pinned here —
+      wherever you see a <code>‹value›</code> in angle quotes, the tool prints your own fresh one,
+      explorer-linked, as you run. Two things to know: <strong>(1)</strong> the covenant in this
+      guide uses a 3-key <em>demo committee</em> you generate locally, because the hosted committee
+      signs the API message format, not the on-chain price encoding — hosted-committee covenants
+      are on the roadmap; <strong>(2)</strong> on-chain consumers are proven on
+      <em>testnet-10</em>; kaspulse has not published to mainnet. When that changes, this box
+      changes. (The one canonical status block is the README's <em>“Status, honestly”</em> section —
+      this box makes the same claims, never stronger.)
+      In the code blocks: <span style="color:var(--green)">green lines</span> are tool output as
+      captured; <span style="color:var(--faint)">grey</span> are comments.
+    </div>
+
+    <div class="layout">
+      <nav class="toc" aria-label="contents">
+        <strong>On this page</strong>
+        <ol start="0">
+          <li><a href="#prereqs">Prerequisites (5 min, once)</a></li>
+          <li><a href="#signed-price">Get a signed price — and verify it</a></li>
+          <li><a href="#covenant">The covenant Kaspa will enforce</a></li>
+          <li><a href="#deploy">Deploy it</a></li>
+          <li><a href="#traps">The traps</a></li>
+          <li><a href="#spend">Spend it</a></li>
+          <li><a href="#prove">Prove it to yourself</a></li>
+          <li><a href="#variations">Variations — and what keeps nodes honest</a></li>
+        </ol>
+      </nav>
+
+      <article class="steps">
+
+    <h2 id="prereqs"><span class="stepno">0</span>Prerequisites — 5 minutes, once</h2>
+    <p>
+      You need a Rust toolchain (stable) and the kaspulse source. The <code>onchain</code> feature
+      pulls in the pinned rusty-kaspa transaction stack — the first build takes <strong>minutes,
+      not seconds</strong>; every later build is incremental.
+    </p>
+    <pre><code><span class="c"># clone the kaspulse repo (linked in the footer), then:</span>
+cd kaspulse
+cargo build --features onchain     <span class="c"># first build compiles the Kaspa stack — go make coffee</span></code></pre>
+    <p>
+      You also need a funded testnet-10 key at <code>~/.kaspulse/tn10.key</code> (a 64-hex Schnorr
+      secret key — testnet funds only, worth nothing). The easiest path is the one the
+      <a href="https://kascov.io/guide.html">kascov guide</a> uses: <code>kascov-lab keygen</code>
+      prints a fresh key's address, and kaspulse's tools read kascov-lab's key file automatically as
+      a fallback — if you already did that guide, you are done with this step.
+    </p>
+    <pre><code><span class="c"># in the kascov repo (github.com/Knitser/kascov) — prints your TN10 address:</span>
+cargo run -p kascov-lab -- keygen
+<span class="o">address:         kaspatest:qq…</span>
+
+<span class="c"># pin the key where kaspulse's tools look first:</span>
+mkdir -p ~/.kaspulse && cp /tmp/kascov-lab-key.hex ~/.kaspulse/tn10.key</code></pre>
+    <p>
+      Fund the printed address at
+      <a href="https://faucet-testnet.kaspanet.io">faucet-testnet.kaspanet.io</a> — it is
+      <strong>Cloudflare-gated, so use a browser</strong>, not curl. Then confirm it arrived:
+    </p>
+    <pre><code>cargo run -p kascov-lab -- balance
+<span class="o">balance: 100.00000000 TKAS</span></code></pre>
+    <div class="callout">
+      <p><strong>In a hurry?</strong> One command runs this entire guide — generates the demo
+      committee, deploys the price gate, waits for confirmation, and spends it with a live signed
+      price:</p>
+      <p><code>cargo run --bin gate --features onchain -- demo --strike 0.02 --value 3</code></p>
+      <p>The rest of this page does the same thing one step at a time, so you can see every
+      moving part.</p>
+    </div>
+
+    <h2 id="signed-price"><span class="stepno">1</span>Get a signed price — and verify it</h2>
+    <p>
+      Ask the oracle for KAS/USD. <code>$BASE</code> is whatever origin serves this page —
+      <code>http://localhost:8080</code> if you run the oracle locally
+      (<code>cargo run --bin oracle</code>), or the hosted origin you are reading this on.
+    </p>
+    <div class="runlabel live">▶ captured from a live run, July 2026</div>
+    <pre><code>BASE=http://localhost:8080     <span class="c"># or this page's own origin</span>
+curl -s $BASE/v1/feed/KAS-USD | jq '{pair, price, mant, expo, signed_ts, message}'
+<span class="o">{</span>
+<span class="o">  "pair": "KAS/USD",</span>
+<span class="o">  "price": 0.02786,</span>
+<span class="o">  "mant": 278600000,</span>
+<span class="o">  "expo": -10,</span>
+<span class="o">  "signed_ts": 1784428033,</span>
+<span class="o">  "message": "kaspulse/v2|KAS/USD|278600000|-10|1784428033|69"</span>
+<span class="o">}</span></code></pre>
+    <p>
+      The price is exact integers, not a float: <code>mant × 10^expo</code> =
+      278600000 × 10<sup>−10</sup> = <strong>$0.02786</strong>. The <code>message</code> is the
+      exact ASCII string all 5 committee nodes signed —
+      <code>kaspulse/v2|PAIR|mant|expo|ts|round</code>. Any 3 of the 5 signatures make the price
+      valid. Now verify it, three ways, escalating in paranoia:
+    </p>
+    <p>
+      <strong>Level 1 — one click.</strong> Open <a href="/#/feed/KAS-USD">the KAS/USD feed
+      page</a> and press <em>verify</em>. Your browser recomputes the blake2b digest and checks all
+      5 BIP340 Schnorr signatures itself, in ~120 lines of dependency-free JS. No server involved
+      in the verdict.
+    </p>
+    <p>
+      <strong>Level 2 — one file, your machine.</strong> The same verifier as a zero-dependency
+      script (<code>clients/js/kaspulse.mjs</code>, or <code>clients/py/kaspulse.py</code> for
+      Python). It self-tests its crypto against official BIP340 vectors before it will verify
+      anything:
+    </p>
+    <div class="runlabel live">▶ captured from a live run, July 2026</div>
+    <pre><code>node clients/js/kaspulse.mjs verify KAS/USD $BASE
+<span class="o">KAS/USD  http://localhost:8080  signed_round 93</span>
+<span class="o">  node 0  ✓  0dd71bf25a98da9ff89a661537997fc9b3f3ae5eb37b23778f11aaec086b8f4a</span>
+<span class="o">  node 1  ✓  d6ce84b11b72c0e4eaccf1070b96d90611d6ba8c8d43022a84a4268b43bf3bd2</span>
+<span class="o">  node 2  ✓  40ffebd6b99e56b258d58574b41d493842c94152c8798827bd1bc4b4adc5d514</span>
+<span class="o">  node 3  ✓  7d4e175938b3b2cc0883f11bfd805eec6c92e7efba1a52af47edfc326cc48864</span>
+<span class="o">  node 4  ✓  458220ba8737cdd5702ba602239a294d00ef1dbc60078d458d35a2bb066fdd0b</span>
+<span class="o">  bound=true (signed message fields == JSON fields)</span>
+<span class="o">✓ VALID — 5/5 signatures verify (threshold 3), price = 0.027875</span></code></pre>
+    <p>
+      (<code>bound=true</code> matters: it checks the <em>signed message's</em> pair/mant/expo/ts
+      fields equal the JSON fields next to it — so the API cannot show you one price while the
+      signatures cover another.)
+    </p>
+    <p>
+      <strong>Level 3 — trust nothing, re-derive everything.</strong>
+      <code>cargo run --bin verify</code> checks every feed's signatures, then goes around the
+      oracle entirely: it re-fetches the exchanges itself, recomputes the median, and re-reads the
+      KRC-20 DEX pools on-chain:
+    </p>
+    <div class="runlabel live">▶ captured from a live run, July 2026 (trimmed — one line per feed)</div>
+    <pre><code>cargo run --bin verify
+<span class="o">kaspulse verify — pulling all feeds from http://127.0.0.1:8080/api/feed</span>
+<span class="o">signatures (need 3 of each feed's nodes):</span>
+<span class="o">  ✓ KAS/USD    5/5 valid</span>
+<span class="o">  ✓ BTC/USD    5/5 valid</span>
+<span class="o">  ✓ ETH/USD    5/5 valid</span>
+<span class="c">  … one line per feed (24 feeds at this run) …</span>
+<span class="o">independent KAS/USD check (re-fetching exchanges myself):</span>
+<span class="o">  Kraken: $0.027870</span>
+<span class="o">  KuCoin: $0.027900</span>
+<span class="o">  Gate.io: $0.027850</span>
+<span class="o">  Bybit: $0.027890</span>
+<span class="o">  MEXC: $0.027872</span>
+<span class="o">  my median $0.027872  vs  feed $0.027890  (0.06% drift) ✓</span>
+<span class="o">independent KRC-20 check (re-reading the DEX pools myself):</span>
+<span class="o">  20 tokens re-read on-chain · 20 reproduce the feed (within TWAP tolerance)</span>
+<span class="o">VERDICT: honest — every feed signed by the threshold, KAS matches the market,</span>
+<span class="o">and the KRC-20 pools reproduce on-chain. No trust required.</span></code></pre>
+    <p>
+      You just audited the oracle. Everything after this point makes <em>Kaspa L1 itself</em> do
+      that audit — at spend time, in script.
+    </p>
+
+    <h2 id="covenant"><span class="stepno">2</span>The covenant Kaspa will enforce</h2>
+    <p>
+      The price gate is a P2SH covenant: a coin only spendable by presenting a price that
+      <strong>(a)</strong> is at or above a strike and <strong>(b)</strong> carries a valid Schnorr
+      signature from <em>every</em> committee key — verified by the node's script engine with
+      post-Toccata's <code>OpCheckSigFromStack</code>, not by any off-chain service. The redeem
+      script (built by <code>kaspulse-sdk</code>'s <code>covenant::price_gate_redeem</code>, the
+      byte-identical script <code>consumer_live</code> proved on TN10):
+    </p>
+    <div class="table-scroll"><table>
+      <tr><th>opcodes</th><th>what the Kaspa VM does</th></tr>
+      <tr><td><code>OpDup ‹strike_e8› OpGreaterThanOrEqual OpVerify</code></td>
+          <td>duplicate the spender's <code>price_bytes</code>, push the strike
+          (e.g. $0.02 → <code>2000000</code>), numeric compare — <strong>abort unless
+          price ≥ strike</strong></td></tr>
+      <tr><td><code>OpBlake2b OpToAltStack</code></td>
+          <td>hash the price bytes — this 32-byte digest is exactly what the committee signed —
+          and stash it on the alt stack</td></tr>
+      <tr><td><code>OpFromAltStack OpDup OpToAltStack ‹pk2› OpCheckSigFromStack OpVerify</code></td>
+          <td>restore the digest (keeping a copy), verify node 2's signature over it —
+          <strong>abort on failure</strong></td></tr>
+      <tr><td><code>OpFromAltStack OpDup OpToAltStack ‹pk1› OpCheckSigFromStack OpVerify</code></td>
+          <td>same for node 1</td></tr>
+      <tr><td><code>OpFromAltStack ‹pk0› OpCheckSigFromStack</code></td>
+          <td>node 0's check leaves the final <code>true</code>/<code>false</code></td></tr>
+    </table></div>
+    <p>
+      <strong><code>price_bytes</code> — the on-chain price encoding.</strong> The price
+      (<code>price_e8</code>, dollars × 10<sup>8</sup>) is pushed as a <em>minimal little-endian
+      script number</em>, because <code>OpGreaterThanOrEqual</code> compares script numbers.
+      Real values, which you can recompute yourself:
+    </p>
+    <div class="table-scroll"><table>
+      <tr><th>price</th><th>price_e8</th><th>price_bytes (hex)</th></tr>
+      <tr><td>$0.02 (the strike below)</td><td><code>2000000</code></td><td><code>80841e</code></td></tr>
+      <tr><td>$0.02786 (the captured live price)</td><td><code>2786000</code></td><td><code>d0822a</code></td></tr>
+      <tr><td>$0.02955 (an earlier capture)</td><td><code>2955000</code></td><td><code>f8162d</code></td></tr>
+    </table></div>
+    <p>
+      The demo committee signs <code>schnorr(blake2b-256(price_bytes))</code> — for
+      <code>d0822a</code> that digest starts <code>338a2f50…</code>. This is a <em>different,
+      simpler</em> encoding than the hosted committee's pipe-delimited message from step 1 — which
+      is exactly why this guide generates a local demo committee (see the
+      <a href="#honest">honest box</a>).
+    </p>
+
+    <h2 id="deploy"><span class="stepno">3</span>Deploy it</h2>
+    <p>
+      Generate the 3-key demo committee (written as <code>gate-node-0.key</code> …
+      <code>gate-node-2.key</code> in the current directory):
+    </p>
+    <pre><code>cargo run --bin gate --features onchain -- keygen
+<span class="o">wrote ./gate-node-0.key</span>
+<span class="o">wrote ./gate-node-1.key</span>
+<span class="o">wrote ./gate-node-2.key</span>
+<span class="o">node 0 x-only pubkey: ‹64 hex — yours›</span>
+<span class="o">node 1 x-only pubkey: ‹64 hex — yours›</span>
+<span class="o">node 2 x-only pubkey: ‹64 hex — yours›</span></code></pre>
+    <p>
+      Look at the covenant before funding it — <code>address</code> prints the redeem script and
+      the testnet-10 P2SH address that commits to it:
+    </p>
+    <pre><code>cargo run --bin gate --features onchain -- address --strike 0.02
+<span class="o">redeem (120 bytes): ‹your redeem hex — deterministic from your 3 pubkeys + the strike›</span>
+<span class="o">TN10 P2SH address: kaspatest:‹…›</span></code></pre>
+    <div class="callout">
+      <p><strong>Watch your covenant get born on kascov →</strong> paste the redeem hex into
+      <a href="https://kascov.io/decode">kascov.io/decode</a> and see it disassembled
+      opcode-by-opcode — you'll recognize every line of the table from step 2, with your own
+      pubkeys and strike in the pushes.</p>
+    </div>
+    <p>Now fund it — 3 TKAS from your <code>~/.kaspulse/tn10.key</code>, locked behind the gate:</p>
+    <pre><code>cargo run --bin gate --features onchain -- deploy --strike 0.02 --value 3
+<span class="o">connected to TN10 · covenant P2SH kaspatest:‹…›</span>
+<span class="o">🎟️  DEPLOYED — 3.00 TKAS locked behind the price gate</span>
+<span class="o">   tx ‹your deploy txid›</span>
+<span class="o">   https://explorer-tn10.kaspa.org/txs/‹your deploy txid›</span>
+<span class="o">next (after ~25s confirm): gate spend --strike 0.02</span></code></pre>
+    <p>
+      Click the printed explorer link: that is your coin, on the real chain, spendable by
+      <em>no signature at all</em> — only by a price that satisfies the script.
+    </p>
+
+    <h2 id="traps"><span class="stepno">4</span>The traps</h2>
+    <p>
+      Four things break first runs. <code>gate</code> handles all four for you — but you will hit
+      every one of them the moment you build your own consumer, so here they are with their exact
+      symptoms.
+    </p>
+    <div class="callout trap">
+      <p><strong>(a) ComputeBudget — three <code>OpCheckSigFromStack</code>s are not free.</strong>
+      Post-Toccata, every input of a v1 transaction commits a per-input
+      <code>computeBudget</code> (1 unit = 10,000 script units), and one Schnorr signature check
+      costs 100,000 units — so three CSFS need ≥ 30 units before counting witness bytes, which are
+      charged 1:1 on top. Commit too little and the node rejects with:</p>
+      <pre><code><span class="e">failed to verify the signature script: script units exceeded</span>
+<span class="e">the amount committed in the input: used=100000, limit=9999</span></code></pre>
+      <p>(<code>limit=9999</code> is the free allowance you get when your committed budget is
+      effectively 0 — the classic symptom of tooling that silently drops the field.) The budget is
+      covered by the signature hash, so you <em>cannot</em> patch it in after signing.
+      <code>gate</code> commits <code>ComputeBudget(120)</code> on the covenant input and
+      <code>50</code> on the fee input; committed budget is charged as mass whether used or not, so
+      the fee scales with it — generous, not <code>65535</code>. The full anatomy of this trap is
+      in the <a href="https://kascov.io/guide.html">kascov guide</a>, step 3.</p>
+    </div>
+    <div class="callout trap">
+      <p><strong>(b) The ~25-second confirmation wait.</strong> Kaspa blocks are ~100 ms, but the
+      public node's UTXO index needs a moment. Run <code>spend</code> too soon and you get the
+      honest recovery message, not a failure:</p>
+      <pre><code><span class="e">coin not in UTXO set yet — wait ~25s for confirm, then re-run `gate spend`</span></code></pre>
+      <p>Nothing is lost — the coin is deployed; re-run and it spends. (<code>gate demo</code>
+      polls for the coin so you never see this.)</p>
+    </div>
+    <div class="callout trap">
+      <p><strong>(c) The second input still needs a plain signature.</strong> The spend has
+      <em>two</em> inputs: input 0 is the covenant coin (unlocked by the witness, no key), input 1
+      is a plain fee-paying UTXO from your wallet — and that one must be signed
+      <code>SIG_HASH_ALL</code> like any normal spend, <em>after</em> the covenant witness is in
+      place (the sighash covers it). Forget input 1's signature — the one that "never needed
+      anything" in single-input tools — and the whole transaction is rejected.</p>
+    </div>
+    <div class="callout trap">
+      <p><strong>(d) Non-minimal <code>price_bytes</code> breaks everything, silently at first.</strong>
+      Script numbers must be minimally encoded: $0.02786 is <code>d0822a</code>, never
+      <code>d0822a00</code>. Pad it and two things break at once — the numeric comparison rejects
+      the push, <em>and</em> the blake2b digest changes so the committee signatures no longer match.
+      Use the SDK's <code>price_bytes()</code> (zero is the <em>empty</em> push; a high top bit
+      gets a <code>0x00</code> pad byte; negatives set <code>0x80</code>) rather than hand-rolling.</p>
+    </div>
+
+    <h2 id="spend"><span class="stepno">5</span>Spend it</h2>
+    <p>
+      <code>spend</code> fetches the live price from the oracle, <strong>verifies it first</strong>
+      (signatures + field binding + freshness, via the SDK — it refuses unverified prices), has the
+      demo committee sign <code>blake2b(price_bytes)</code>, builds the witness, and broadcasts:
+    </p>
+    <pre><code>cargo run --bin gate --features onchain -- spend --strike 0.02
+<span class="o">connected to TN10 · covenant P2SH kaspatest:‹…›</span>
+<span class="o">oracle KAS/USD = $0.027860 (verified: 3-of-5 sigs + field binding)  ·  strike $0.020000</span>
+<span class="o">witness: [3 sigs, price_bytes(2786000), redeem] = 321 bytes</span>
+<span class="o">💸 UNLOCKED — released ‹payout› TKAS: Kaspa L1 verified 3 committee sigs + price ≥ strike.</span>
+<span class="o">   tx ‹your spend txid›</span>
+<span class="o">   https://explorer-tn10.kaspa.org/txs/‹your spend txid›</span></code></pre>
+    <p>
+      The witness pushes, bottom→top: <code>[sig0, sig1, sig2, price_bytes, redeem]</code>. The
+      node ran the whole table from step 2 — three independent signatures <em>plus</em> the price
+      condition, verified by L1 consensus, no oracle server in the loop at spend time. (If the
+      price had been below the strike, <code>gate</code> refuses before broadcasting — and if you
+      force it, the chain refuses too. That's the point.)
+    </p>
+    <p>
+      How fast does a signed price become a spendable on-chain fact? Measured on live TN10 via a
+      <em>public</em> node: <strong>1.39 s average</strong> tick→UTXO (1510/1154/1507 ms over three
+      rounds; own-node path is sub-second) — see <code>KASPA-EDGE.md</code> in the repo, reproduce with
+      <code>cargo run --bin latency --features onchain</code>.
+    </p>
+
+    <h2 id="prove"><span class="stepno">6</span>Prove it to yourself</h2>
+    <p>
+      Don't take this page's word for what just happened — the proof is all public.
+    </p>
+    <p>
+      <strong>Read the witness off the chain.</strong> Open your spend txid on the
+      <a href="https://explorer-tn10.kaspa.org">TN10 explorer</a> and expand input 0's signature
+      script: you will see your five pushes — three 64-byte signatures, your 3-byte price, your
+      120-byte redeem script.
+    </p>
+    <p>
+      <strong>Re-verify the three signatures yourself</strong> — same one-file client from step 1,
+      no oracle involved:
+    </p>
+    <pre><code>python3 - &lt;&lt;'EOF'
+import sys; sys.path.insert(0, 'clients/py')
+from kaspulse import blake2b256, bip340_verify
+
+price_bytes = bytes.fromhex('d0822a')        <span class="c"># the price push from YOUR witness</span>
+digest = blake2b256(price_bytes)             <span class="c"># what the demo committee signed</span>
+pubkeys = ['‹node 0 pubkey›', '‹node 1 pubkey›', '‹node 2 pubkey›']   <span class="c"># from `gate keygen`</span>
+sigs    = ['‹sig 0›', '‹sig 1›', '‹sig 2›']  <span class="c"># the three 64-byte pushes from the witness</span>
+for i, (pk, sig) in enumerate(zip(pubkeys, sigs)):
+    print(f'node {i}:', bip340_verify(bytes.fromhex(pk), digest, bytes.fromhex(sig)))
+EOF
+<span class="o">node 0: True</span>
+<span class="o">node 1: True</span>
+<span class="o">node 2: True</span></code></pre>
+    <p>
+      <strong>Replay the script on kascov.</strong> Paste your spend txid into the
+      <a href="https://kascov.io">kascov.io</a> search (network: testnet-10) and hit
+      <em>“⧉ replay this spend”</em> — it runs your captured witness through the real
+      <code>TxScriptEngine</code> and streams the opcode-by-opcode trace: the strike comparison,
+      the blake2b, all three <code>OpCheckSigFromStack</code>s, the final verdict. The same trace
+      is one curl away: <code>curl -s https://kascov.io/data/testnet-10/debug/‹your spend txid› | jq .verdict</code>.
+    </p>
+
+    <h2 id="variations"><span class="stepno">7</span>Variations — and what keeps nodes honest</h2>
+    <h3>Flip the gate: a liquidation trigger</h3>
+    <p>
+      The gate compares in one direction. Flipping <em>one opcode</em> —
+      <code>OpGreaterThanOrEqual</code> → <code>OpLessThanOrEqual</code> — turns the payout into a
+      liquidation/stop trigger that releases only when the price <em>falls to</em> the strike. In
+      the SDK that is one argument:
+    </p>
+    <pre><code><span class="c">// release iff price ≥ strike (this guide):</span>
+price_gate_redeem_dir(&amp;committee, strike_e8, Gate::AtOrAbove)
+<span class="c">// release iff price ≤ strike (liquidations, stop conditions):</span>
+price_gate_redeem_dir(&amp;committee, strike_e8, Gate::AtOrBelow)</code></pre>
+    <h3>Range settle</h3>
+    <p>
+      <code>range_settle_redeem(&amp;committee, low_e8, high_e8)</code> releases only when
+      <code>low ≤ price ≤ high</code> — two <code>OpDup</code>-compare-<code>OpVerify</code> blocks
+      in front of the same committee tail, same witness shape. Options expiries, bounded payouts,
+      "settle inside the band" contracts.
+    </p>
+    <h3>What keeps nodes honest: the equivocation bond</h3>
+    <p>
+      A price gate is only as good as the committee's honesty — so kaspulse's economic-security
+      story is a covenant too. Alongside every round, a node signs a fixed <strong>24-byte
+      attestation record</strong>: <code>blake2b(pair)[0..8] ‖ round_be ‖ mant_be</code>. Sign two
+      <em>different</em> prices for the <em>same</em> slot and those two records are a
+      cryptographic proof of double-signing — and a bond covenant
+      (<code>covenant::bond::bond_redeem</code>) lets <em>anyone</em> who holds that proof seize
+      the node's bond, verified purely by Kaspa L1 script. Real records, which you can recompute
+      (blake2b-256(<code>"KAS/USD"</code>) starts <code>b84ad8389aa2ebb0…</code>):
+    </p>
+    <div class="table-scroll"><table>
+      <tr><th></th><th>slot: pair-id ‖ round 42</th><th>price (mant, big-endian)</th></tr>
+      <tr><td><code>rec1</code> ($0.029)</td><td><code>b84ad8389aa2ebb0 000000000000002a</code></td><td><code>00000000002c4020</code></td></tr>
+      <tr><td><code>rec2</code> ($0.058)</td><td><code>b84ad8389aa2ebb0 000000000000002a</code></td><td><code>0000000000588040</code></td></tr>
+    </table></div>
+    <p>
+      Same first 16 bytes, different last 8 → slashable. The script checks exactly four things
+      (two <code>OpCheckSigFromStack</code>s, an <code>OpSubstr</code> slot-equality, an
+      <code>OpSubstr</code> price-inequality) — which yields four cases, and only one of them
+      slashes. This run is the local Kaspa script engine executing the real bond covenant:
+    </p>
+    <div class="runlabel live">▶ captured from a live run, July 2026</div>
+    <pre><code>cargo run --bin slash --features onchain
+<span class="o">bonded oracle node key: af36ed050dd1919b7c1aaefe586232c6b8ba9fb7b88fcbcd70ae64766f295163</span>
+<span class="o">[1] real equivocation (slot=KAS/USD#42, $0.029 vs $0.058) → bond SLASHED: true</span>
+<span class="o">[2] different rounds (honest update)          → NOT slashable: true</span>
+<span class="o">[3] same price twice (no conflict)            → NOT slashable: true</span>
+<span class="o">[4] forged 2nd sig (attacker's key)           → NOT slashable: true</span>
+<span class="o">✅ Script-enforced slashing WORKS. A node that double-signs a price loses its bond to</span>
+<span class="o">   whoever catches it — verified purely by Kaspa L1 (OpCat/OpSubstr/OpCheckSigFromStack),</span>
+<span class="o">   no committee and no governance.</span></code></pre>
+    <p>
+      And it ran on the real chain, not just the local engine: <code>slash_live</code> posts a real
+      3-TKAS bond on TN10 and then slashes it with a real double-signing proof — we slashed our own
+      bond, on purpose. Reproduce it end-to-end (your own bond, your own fresh txids):
+    </p>
+    <pre><code>cargo run --bin slash_live --features onchain
+<span class="o">🔒 BONDED — 3.00 TKAS posted by the node behind the slashing covenant</span>
+<span class="o">   tx ‹your bond txid›</span>
+<span class="o">⚠️  caught: the node signed KAS/USD round 42 as BOTH $0.029 AND $0.058 — equivocation.</span>
+<span class="o">💥 SLASHED — the bond was seized on-chain by proving the double-signing, verified by Kaspa L1.</span>
+<span class="o">   tx ‹your slash txid›</span></code></pre>
+    <p>
+      One honest limitation, stated in the code itself: the bond covenant ships its
+      <em>slashing</em> path only — the honest node's reclaim-timelock branch is marked unproven in
+      <code>src/slash.rs</code>, so the SDK does not expose it until it is proven. The operator's
+      view of bonds, monitoring, and running a signer of your own:
+      <code>docs/OPERATOR.md</code> in the repo (also linked from <a href="/#/docs">the docs hub</a>).
+    </p>
+
+    <footer>
+      <p>
+        <a href="/">kaspulse — live board</a> ·
+        <a href="/#/dev">JSON API</a> ·
+        <a href="/#/docs">docs</a> ·
+        <a href="https://kascov.io">kascov.io — covenant explorer</a>
+      </p>
+      <p>A step that didn't work as written? Open an issue — this page only documents what has
+      actually been run.</p>
+    </footer>
+
+      </article>
+    </div>
+  </main>
+
+  <script>
+    /* copy buttons — the page's only JS */
+    document.querySelectorAll('pre').forEach((pre) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'copy-btn';
+      btn.textContent = 'copy';
+      btn.addEventListener('click', () => {
+        /* copy only the command lines: skip output/error spans */
+        const clone = pre.cloneNode(true);
+        clone.querySelectorAll('.o, .e, .copy-btn').forEach((n) => n.remove());
+        const text = clone.textContent.replace(/^\s*\n/gm, '').trimEnd();
+        navigator.clipboard.writeText(text).then(() => {
+          btn.textContent = 'copied ✓';
+          setTimeout(() => { btn.textContent = 'copy'; }, 1200);
+        });
+      });
+      pre.appendChild(btn);
+    });
+  </script>
+</body>
+</html>

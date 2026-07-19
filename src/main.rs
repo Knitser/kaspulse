@@ -10,11 +10,13 @@
 //! project's API.
 
 #![allow(deprecated)] // tungstenite 0.21: write_message/read_message
+mod http;
+#[cfg(feature = "og")]
+mod og;
+
 use anyhow::Result;
 use secp256k1::{Keypair, SECP256K1};
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tungstenite::{connect, Message};
@@ -44,10 +46,19 @@ fn set_price(lp: &Live, pair: &str, ex: &'static str, price: f64) {
 // chains (Kasplex + Igra) — each is a separate on-chain source; build() medians.
 #[derive(Clone)]
 struct Pool { symbol: String, pool: String, wkas_is_token0: bool, dec: u32, chain: String }
+/// On-chain token symbols are attacker-chosen bytes. A symbol becomes a pair
+/// name inside the signed message ('|'-delimited!), a URL path segment, HTML,
+/// XML and our hand-built pools.json — so only a strict charset is accepted;
+/// anything else is rejected (not mangled: "M&M" quoted as "MM" would lie).
+fn clean_symbol(s: &str) -> Option<String> {
+    let ok = !s.is_empty() && s.len() <= 32
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'));
+    if ok { Some(s.to_string()) } else { None }
+}
 fn parse_pools(s: &str) -> Vec<Pool> {
     serde_json::from_str::<serde_json::Value>(s).ok()
         .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|p| {
-            let symbol = p["symbol"].as_str()?.to_string();
+            let symbol = clean_symbol(p["symbol"].as_str()?)?;
             // a KRC-20 meme token named KAS/BTC/ETH must NOT collide with the real major feeds
             if matches!(symbol.to_uppercase().as_str(), "KAS" | "BTC" | "ETH") { return None; }
             Some(Pool { symbol, pool: p["pair"].as_str()?.to_string(),
@@ -252,7 +263,7 @@ fn discover_venue(v: &Venue) -> Vec<Pool> {
         if h.len() < 128 { return None; }
         let (rw, rt) = if *b0 { (resv(&h[0..64])?, resv(&h[64..128])?) } else { (resv(&h[64..128])?, resv(&h[0..64])?) };
         if rw / 1e18 < 50.0 || rt <= 0.0 { return None; }
-        let sym = call_str(&rpcs, tok, "0x95d89b41")?;
+        let sym = clean_symbol(&call_str(&rpcs, tok, "0x95d89b41")?)?;
         if matches!(sym.to_uppercase().as_str(), "KAS" | "BTC" | "ETH" | "WKAS" | "WIKAS") { return None; }
         let dec = call_u128(&rpcs, tok, "0x313ce567").map(|d| d as u32).filter(|d| *d <= 30).unwrap_or(18);
         Some(Pool { symbol: sym, pool: pool.clone(), wkas_is_token0: *b0, dec, chain: v.chain.to_string() })
@@ -272,7 +283,8 @@ fn discover_thread() {
             *pools_cell().lock().unwrap() = Arc::new(all);
             eprintln!("auto-discovery: refreshed {} pools across {} venues", load_pools().len(), venues().len());
         } else {
-            eprintln!("auto-discovery: only {} pools found — keeping the current set", all.len());
+            // exact token — the deploy's log-based alert policy matches it
+            eprintln!("KASPULSE_DISCOVERY_EMPTY: only {} pools found — keeping the current set", all.len());
         }
         std::thread::sleep(Duration::from_secs(600)); // every 10 min
     }
@@ -317,11 +329,50 @@ fn slow_thread(lp: Live) {
 
 // ---------- median + signing ----------
 fn median(xs: &[f64]) -> f64 { let mut v = xs.to_vec(); v.sort_by(|a, b| a.partial_cmp(b).unwrap()); let n = v.len(); if n == 0 { 0.0 } else if n % 2 == 1 { v[n/2] } else { (v[n/2-1]+v[n/2])/2.0 } }
+/// Committee key custody — committee continuity IS the product: a keyless
+/// restart that silently mints a fresh committee breaks every verifier and
+/// on-chain consumer that pinned the old pubkeys. Precedence:
+///   (a) env KASPULSE_NODE_KEYS — comma-separated n×64-hex secret keys
+///       (Cloud Run injects this via Secret Manager, see scripts/setup-keys.sh)
+///   (b) kaspulse-node-{i}.key files (local dev)
+///   (c) generate + write files — but ONLY when KASPULSE_REQUIRE_KEYS != "1";
+///       with it set (deploy.sh sets it), missing/malformed keys log the exact
+///       token KASPULSE_KEYS_MISSING (alert policy matches it) and exit(1).
 fn load_keys(n: usize) -> Vec<Keypair> {
-    (0..n).map(|i| { let path = format!("kaspulse-node-{i}.key");
-        if let Ok(raw) = std::fs::read_to_string(&path) { if let Ok(b) = hex::decode(raw.trim()) { if let Ok(sk) = secp256k1::SecretKey::from_slice(&b) { return Keypair::from_secret_key(SECP256K1, &sk); } } }
-        let kp = Keypair::new(SECP256K1, &mut secp256k1::rand::thread_rng()); let _ = std::fs::write(&path, hex::encode(kp.secret_key().secret_bytes())); kp
-    }).collect()
+    let require = std::env::var("KASPULSE_REQUIRE_KEYS").map_or(false, |v| v == "1");
+    let parse = |h: &str| hex::decode(h.trim()).ok()
+        .and_then(|b| secp256k1::SecretKey::from_slice(&b).ok())
+        .map(|sk| Keypair::from_secret_key(SECP256K1, &sk));
+    if let Ok(envk) = std::env::var("KASPULSE_NODE_KEYS") {
+        let parts: Vec<&str> = envk.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        let keys: Vec<Keypair> = parts.iter().filter_map(|h| parse(h)).collect();
+        if parts.len() == n && keys.len() == n {
+            eprintln!("keys: loaded the {n}-node committee from KASPULSE_NODE_KEYS");
+            return keys;
+        }
+        if require {
+            eprintln!("KASPULSE_KEYS_MISSING: KASPULSE_NODE_KEYS is set but malformed ({}/{n} keys parsed) — refusing to generate a new committee", keys.len());
+            std::process::exit(1);
+        }
+        eprintln!("warning: KASPULSE_NODE_KEYS is set but malformed ({}/{n} keys parsed) — falling back to key files", keys.len());
+    }
+    let mut generated = 0usize;
+    let keys: Vec<Keypair> = (0..n).map(|i| {
+        let path = format!("kaspulse-node-{i}.key");
+        if let Some(kp) = std::fs::read_to_string(&path).ok().and_then(|raw| parse(&raw)) { return kp; }
+        if require {
+            eprintln!("KASPULSE_KEYS_MISSING: {path} absent or malformed — refusing to generate a new committee");
+            std::process::exit(1);
+        }
+        generated += 1;
+        let kp = Keypair::new(SECP256K1, &mut secp256k1::rand::thread_rng());
+        let _ = std::fs::write(&path, hex::encode(kp.secret_key().secret_bytes()));
+        kp
+    }).collect();
+    if generated > 0 {
+        eprintln!("WARNING: minted {generated} FRESH committee key(s) — every verifier or on-chain consumer pinned to the previous pubkeys just broke. For any public deploy set KASPULSE_NODE_KEYS (scripts/setup-keys.sh) and KASPULSE_REQUIRE_KEYS=1.");
+    }
+    keys
 }
 fn sign(kp: &Keypair, msg: &str) -> String { let h = blake2b_simd::Params::new().hash_length(32).hash(msg.as_bytes()); hex::encode(kp.sign_schnorr(secp256k1::Message::from_digest_slice(h.as_bytes()).unwrap()).as_ref()) }
 fn enum_(p: f64) -> String { if p == 0.0 { "0".into() } else { format!("{p}") } }
@@ -361,7 +412,10 @@ fn mad_filter(srcs: &mut Vec<(&str, f64, u64)>) -> Vec<String> {
 
 struct FeedRow { cfg: FeedCfg, srcs: Vec<(String, f64, u64)>, outliers: Vec<String>, med: f64, halted: bool, degraded: bool }
 
-fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec<(u64, f64)>>, scache: &mut HashMap<String, SignCache>, bstate: &mut HashMap<String, (f64, u32)>) -> String {
+/// One build round's pre-serialized output — everything http::PubState serves.
+struct Built { envelope: String, per_pair: Vec<(String, String)>, catalog: String, feeds_total: usize, feeds_live: usize }
+
+fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec<(u64, f64)>>, scache: &mut HashMap<String, SignCache>, bstate: &mut HashMap<String, (f64, u32)>) -> Built {
     let ts = now(); let tms = now_ms();
     let signers: Vec<String> = keys.iter().map(|k| format!("\"{}\"", hex::encode(k.x_only_public_key().0.serialize()))).collect();
     let book = lp.lock().unwrap().clone();
@@ -394,6 +448,9 @@ fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec
 
     // ── pass 2: sign the PUBLISHED price + render ──
     let mut objs = Vec::new();
+    let mut per_pair: Vec<(String, String)> = Vec::new(); // "KAS-USD" -> FeedObj JSON
+    let mut cat_rows: Vec<String> = Vec::new();           // /v1/feeds light catalog
+    let mut feeds_live = 0usize;
     for r in &rows {
         let med = r.med;
         let price_e8 = (med * 1e8).round() as u64; // informational only — the SIGNED price is mant×10^expo
@@ -424,44 +481,35 @@ fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec
         } else { String::new() };
         let h = hist.entry(r.cfg.pair.clone()).or_default(); h.push((ts, med)); if h.len() > HISTORY { let d = h.len() - HISTORY; h.drain(0..d); }
         let hist_j: Vec<String> = h.iter().map(|(t, p)| format!("[{t},{}]", enum_(*p))).collect();
-        objs.push(format!(
+        let obj = format!(
             r#"{{"pair":"{}","kind":"{}","price":{},"price_e8":{price_e8},"mant":{mant},"expo":{expo},"sources":[{}],"num_sources":{},"outliers":[{}],"halted":{},"degraded":{}{peg_field},"freshest_ms":{freshest},"low":{},"high":{},"spread_bps":{:.2},"median":{},"twap":true,"liq_wkas":{:.0},"thin":{thin},"signers":[{}],"threshold":{THRESHOLD},"signatures":[{}],"message":"{msg}","signed_ts":{signed_ts},"signed_round":{signed_round},"history":[{}]}}"#,
             r.cfg.pair, r.cfg.kind, enum_(med), src_j.join(","), r.srcs.len(), out_j.join(","), r.halted, r.degraded, enum_(lo), enum_(hi), spread, enum_(med), liq, signers.join(","), sigs_json, hist_j.join(",")
-        ));
+        );
+        // per-pair map (dash form, uppercase) — /v1/feed/{PAIR} serves this
+        // string directly instead of re-parsing the whole envelope per request
+        per_pair.push((r.cfg.pair.replace('/', "-").to_uppercase(), obj.clone()));
+        // light catalog row — what dashboards poll instead of the full envelope
+        cat_rows.push(format!(
+            r#"{{"pair":"{}","kind":"{}","price":{},"num_sources":{},"halted":{},"degraded":{},"thin":{thin},"liq_wkas":{:.0},"spread_bps":{:.2},"freshest_ms":{freshest}}}"#,
+            r.cfg.pair, r.cfg.kind, enum_(med), r.srcs.len(), r.halted, r.degraded, liq, spread));
+        if !r.halted && !r.srcs.is_empty() { feeds_live += 1; }
+        objs.push(obj);
     }
     let peg_j = format!(r#"{{"igra_usdc":{},"igra_ok":{}}}"#,
         usdc.map(|u| format!("{u}")).unwrap_or_else(|| "null".into()),
         igra_peg_ok.map(|b| b.to_string()).unwrap_or_else(|| "null".into()));
-    format!(r#"{{"round":{round},"timestamp":{ts},"threshold":{THRESHOLD},"num_nodes":{N_NODES},"transport":"websocket","peg":{peg_j},"feeds":[{}]}}"#, objs.join(","))
+    let envelope = format!(r#"{{"round":{round},"timestamp":{ts},"threshold":{THRESHOLD},"num_nodes":{N_NODES},"transport":"websocket","peg":{peg_j},"feeds":[{}]}}"#, objs.join(","));
+    let catalog = format!(r#"{{"round":{round},"timestamp":{ts},"count":{},"feeds":[{}]}}"#, cat_rows.len(), cat_rows.join(","));
+    Built { envelope, per_pair, catalog, feeds_total: rows.len(), feeds_live }
 }
 
-// ---------- http ----------
-fn mime(p: &str) -> &'static str { if p.ends_with(".html") { "text/html; charset=utf-8" } else if p.ends_with(".js") { "application/javascript" } else if p.ends_with(".css") { "text/css" } else if p.ends_with(".json") { "application/json" } else { "text/plain" } }
-fn serve(mut s: std::net::TcpStream, feed: &Arc<Mutex<String>>) {
-    let mut buf = [0u8; 2048]; let n = match s.read(&mut buf) { Ok(n) => n, Err(_) => return };
-    let path = String::from_utf8_lossy(&buf[..n]).split_whitespace().nth(1).unwrap_or("/").to_string();
-    let cors = "Access-Control-Allow-Origin: *\r\n";
-    let (status, ctype, body): (&str, &str, Vec<u8>) = if path.starts_with("/api/feed") || path == "/feed.json" {
-        let full = feed.lock().unwrap().clone();
-        if let Some(p) = path.strip_prefix("/api/feed/") {
-            let want = p.replace('-', "/").to_uppercase();
-            let one = serde_json::from_str::<serde_json::Value>(&full).ok().and_then(|v| v["feeds"].as_array()?.iter().find(|f| f["pair"].as_str() == Some(&want)).cloned()).map(|v| v.to_string()).unwrap_or_else(|| "{\"error\":\"no such feed\"}".into());
-            ("200 OK", "application/json", one.into_bytes())
-        } else { ("200 OK", "application/json", full.into_bytes()) }
-    } else {
-        let file = if path == "/" { "index.html".into() } else { path.trim_start_matches('/').to_string() };
-        match if !file.contains("..") { std::fs::read(format!("web/{file}")).ok() } else { None } { Some(b) => ("200 OK", mime(&file), b), None => ("404 Not Found", "text/plain", b"not found".to_vec()) }
-    };
-    let _ = s.write_all(format!("HTTP/1.1 {status}\r\n{cors}Content-Type: {ctype}\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes());
-    let _ = s.write_all(&body);
-}
+// ---------- http: see src/http.rs (hardened std server, /v1 + aliases) ----------
 
 fn main() -> Result<()> {
     let keys = load_keys(N_NODES);
     println!("kaspulse oracle — WebSocket streaming · {N_NODES} nodes, {THRESHOLD}-of-{N_NODES} · serve every {SERVE_MS}ms");
-    println!("  majors: Kraken+Bybit (WS, sub-second) + KuCoin/Gate/MEXC (REST {SLOW_EVERY}s)");
-    println!("  KRC-20: CoinGecko + GeckoTerminal (Kasplex DEX)");
-    println!("serving http://127.0.0.1:{PORT}");
+    println!("  majors: Kraken+Bybit+OKX+Coinbase (WS, sub-second) + KuCoin/Gate/MEXC (REST {SLOW_EVERY}s)");
+    println!("  KRC-20: direct Kasplex/Igra DEX pool reads (cross-checked RPCs)");
 
     std::thread::spawn(discover_thread);
     let lp: Live = Arc::new(Mutex::new(HashMap::new()));
@@ -469,15 +517,14 @@ fn main() -> Result<()> {
         std::thread::spawn(move || f(lpc));
     }
 
-    let feed = Arc::new(Mutex::new(r#"{"feeds":[]}"#.to_string()));
+    let state = Arc::new(http::PubState::new());
     {
-        let (feed, lp) = (feed.clone(), lp.clone());
+        let (state, lp) = (state.clone(), lp.clone());
         std::thread::spawn(move || {
             let mut round = 1u64; let mut hist = HashMap::new(); let mut scache = HashMap::new(); let mut bstate = HashMap::new();
             loop {
-                let json = build(&lp, &keys, round, &mut hist, &mut scache, &mut bstate);
-                let _ = std::fs::write("web/feed.json", &json);
-                *feed.lock().unwrap() = json;
+                let b = build(&lp, &keys, round, &mut hist, &mut scache, &mut bstate);
+                state.publish(b.envelope, b.per_pair, b.catalog, round, load_pools().len(), b.feeds_total, b.feeds_live);
                 round += 1;
                 std::thread::sleep(Duration::from_millis(SERVE_MS));
             }
@@ -486,7 +533,7 @@ fn main() -> Result<()> {
     // bind 0.0.0.0:$PORT so it runs behind Cloud Run / a reverse proxy (PORT env),
     // falling back to the local default
     let port: u16 = std::env::var("PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(PORT);
-    let listener = TcpListener::bind(("0.0.0.0", port))?;
-    for stream in listener.incoming() { if let Ok(s) = stream { let feed = feed.clone(); std::thread::spawn(move || serve(s, &feed)); } }
+    println!("serving http://127.0.0.1:{port}  (/v1/feed · /v1/feeds · /health)");
+    http::run(port, state)?;
     Ok(())
 }

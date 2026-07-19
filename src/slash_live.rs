@@ -3,6 +3,9 @@
 //! proven on the real chain: a node that signs two prices for the same slot
 //! loses its bond to whoever catches it — verified purely by Kaspa L1 script.
 //!
+//! Script + records come from kaspulse-sdk (`covenant::bond`) — one source of
+//! truth for the proven bytes.
+//!
 //! Run: cargo run --bin slash_live --features onchain
 
 #![allow(deprecated)]
@@ -18,34 +21,17 @@ use kaspa_consensus_core::{
     tx::{ComputeCommit, MutableTransaction, Transaction, TransactionInput, TransactionOutpoint, TransactionOutput, UtxoEntry},
 };
 use kaspa_rpc_core::api::rpc::RpcApi;
-use kaspa_txscript::{extract_script_pub_key_address, opcodes::codes::*, pay_to_address_script, pay_to_script_hash_script, script_builder::ScriptBuilder};
+use kaspa_txscript::{pay_to_address_script, script_builder::ScriptBuilder};
 use kaspa_wrpc_client::{client::ConnectOptions, prelude::{NetworkId, NetworkType}, KaspaRpcClient, Resolver, WrpcEncoding};
+use kaspulse_sdk::covenant::{bond::{attestation_record, bond_redeem, slash_witness}, p2sh_address, p2sh_script};
 use secp256k1::{Keypair, Message, SECP256K1};
 use std::time::Duration;
 
 const FEE: u64 = 500_000;
 
 fn blake32(b: &[u8]) -> [u8; 32] { let h = blake2b_simd::Params::new().hash_length(32).hash(b); let mut o = [0u8; 32]; o.copy_from_slice(h.as_bytes()); o }
-fn record(pair: &str, round: u64, mant: u64) -> Vec<u8> { let mut r = blake32(pair.as_bytes())[..8].to_vec(); r.extend_from_slice(&round.to_be_bytes()); r.extend_from_slice(&mant.to_be_bytes()); r }
+fn record(pair: &str, round: u64, mant: u64) -> Vec<u8> { attestation_record(pair, round, mant).to_vec() }
 fn node_sign(kp: &Keypair, rec: &[u8]) -> Vec<u8> { kp.sign_schnorr(Message::from_digest_slice(&blake32(rec)).unwrap()).as_ref().to_vec() }
-
-/// bond redeem — slashes iff two valid, same-slot, different-price records (see slash.rs)
-fn redeem(npk: &[u8]) -> Vec<u8> {
-    let mut b = ScriptBuilder::new();
-    b.add_op(OpSwap).unwrap().add_op(OpDup).unwrap().add_op(OpToAltStack).unwrap().add_op(OpBlake2b).unwrap()
-        .add_data(npk).unwrap().add_op(OpCheckSigFromStack).unwrap().add_op(OpVerify).unwrap();
-    b.add_op(OpSwap).unwrap().add_op(OpDup).unwrap().add_op(OpToAltStack).unwrap().add_op(OpBlake2b).unwrap()
-        .add_data(npk).unwrap().add_op(OpCheckSigFromStack).unwrap().add_op(OpVerify).unwrap();
-    b.add_op(OpFromAltStack).unwrap().add_op(OpFromAltStack).unwrap();
-    b.add_op(Op2Dup).unwrap()
-        .add_i64(0).unwrap().add_i64(16).unwrap().add_op(OpSubstr).unwrap()
-        .add_op(OpSwap).unwrap().add_i64(0).unwrap().add_i64(16).unwrap().add_op(OpSubstr).unwrap()
-        .add_op(OpEqualVerify).unwrap();
-    b.add_i64(16).unwrap().add_i64(24).unwrap().add_op(OpSubstr).unwrap()
-        .add_op(OpSwap).unwrap().add_i64(16).unwrap().add_i64(24).unwrap().add_op(OpSubstr).unwrap()
-        .add_op(OpEqual).unwrap().add_op(OpNot).unwrap();
-    b.drain()
-}
 
 fn load_key() -> Result<Keypair> {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -67,9 +53,9 @@ async fn main() -> Result<()> {
     let my_spk = pay_to_address_script(&me);
     let node = Keypair::new(SECP256K1, &mut secp256k1::rand::thread_rng());
     let npk = node.public_key().x_only_public_key().0.serialize();
-    let r = redeem(&npk);
-    let p2sh = pay_to_script_hash_script(&r);
-    let p2sh_addr = extract_script_pub_key_address(&p2sh, Prefix::Testnet).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let r = bond_redeem(&npk);
+    let p2sh = p2sh_script(&r);
+    let p2sh_addr = p2sh_address(&r, Prefix::Testnet).map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("bonded oracle node: {}", hex::encode(npk));
     println!("bond covenant P2SH: {p2sh_addr}");
 
@@ -107,7 +93,7 @@ async fn main() -> Result<()> {
     let mine = client.get_utxos_by_addresses(vec![me.clone().into()]).await?;
     let feeu = mine.iter().filter(|u| u.utxo_entry.covenant_id.is_none() && u.utxo_entry.amount > 10_000_000).max_by_key(|u| u.utxo_entry.amount).context("no fee UTXO")?;
 
-    let sig_script = ScriptBuilder::new().add_data(&rec1)?.add_data(&sig1)?.add_data(&rec2)?.add_data(&sig2)?.add_data(&r)?.drain();
+    let sig_script = slash_witness(&rec1, &sig1, &rec2, &sig2, &r);
     let net_fee: u64 = 5_000_000;
     let payout = state.utxo_entry.amount + feeu.utxo_entry.amount - net_fee;
     let bond_in = TransactionInput::new_with_mass(TransactionOutpoint::new(state.outpoint.transaction_id, state.outpoint.index), vec![], 0, ComputeCommit::ComputeBudget(ComputeBudget(90)));

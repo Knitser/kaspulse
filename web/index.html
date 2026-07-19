@@ -3,65 +3,328 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>kaspulse — real-time price oracle for Kaspa</title>
+  <title>kaspulse — the covenant-ready price oracle for Kaspa</title>
+  <meta name="description" content="Every price Kaspa needs, signed &amp; sub-second: 60+ live feeds — majors + 55+ KRC-20 tokens — each a median of independent venues, 3-of-5 threshold-signed, verifiable by anyone, consumable by a Kaspa covenant on L1.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="kaspulse — the covenant-ready price oracle for Kaspa">
+  <meta property="og:description" content="60+ live feeds, median of independent venues, 3-of-5 threshold-signed, verifiable in your browser — consumable by a Kaspa covenant on L1.">
+  <!-- root-relative on disk; the server absolutizes content="/og…" via BASE_URL
+       (scrapers require absolute og:image URLs) -->
+  <meta property="og:image" content="/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="kaspulse — the covenant-ready price oracle for Kaspa">
+  <meta name="twitter:image" content="/og.png">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230a0e14'/%3E%3Cpath d='M8 34h12l6-16 8 30 6-20 4 10h12' fill='none' stroke='%2349eacb' stroke-width='4' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap">
   <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"kaspulse","description":"The covenant-ready price oracle for Kaspa L1 — 60+ live feeds, threshold-signed, verifiable by anyone."}</script>
 </head>
 <body>
   <div class="aura"></div>
+
   <header class="nav">
-    <a class="brand" href="#">
+    <a class="brand" href="#/">
       <svg class="sigil" viewBox="0 0 64 64" width="26" height="26" aria-hidden="true"><path d="M6 34h11l6-17 8 32 6-22 4 11h13" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/></svg>
       kaspulse
     </a>
-    <span class="nav-tag">real-time price oracle · Kaspa L1</span>
+    <nav class="nav-links">
+      <a href="#/feeds" data-nav="feeds">feeds</a>
+      <a href="#/docs" data-nav="docs">docs</a>
+      <a href="#/dev" data-nav="dev">dev</a>
+      <a href="/guide.html">guide</a>
+      <a class="nav-gh" href="https://github.com/Knitser/kaspulse">github</a>
+    </nav>
   </header>
 
-  <section class="hero">
-    <div class="eyebrow">sub-second · native to Kaspa · KRC-20 coverage</div>
-    <h1>Every price Kaspa needs,<br><span class="grad">signed &amp; sub-second.</span></h1>
-    <p class="lede">Majors stream over WebSocket — prices land in <strong>&lt;1s</strong>, fresher than most on-chain oracles — plus the KRC-20 tokens the big oracles ignore. Each a median of independent exchanges, threshold-signed, verifiable on Kaspa's L1. No single venue, no single operator, no other Kaspa project's API.</p>
-  </section>
+  <main id="view"></main>
 
-  <section class="board">
-    <div class="board-head">
-      <div class="bh-title">Live feeds</div>
-      <div class="bh-meta"><span id="fresh-stat" class="fresh-stat">—</span> · <span id="round">—</span> · <span id="threshold">—</span> · <span class="live" id="live"><span class="on">●</span> LIVE</span></div>
-    </div>
-    <div class="feeds" id="feeds"></div>
-    <div class="board-foot" id="boardfoot">connecting…</div>
-  </section>
+  <footer class="foot">
+    <span class="fk">kaspulse</span> · the covenant-ready price oracle for Kaspa ·
+    <a href="https://github.com/Knitser/kaspulse">github</a> ·
+    by the maker of <a href="https://kascov.io">kascov.io</a>
+    <span class="foot-status" id="foot-status"></span>
+  </footer>
 
-  <section class="consume">
-    <h2 class="section-h">Consume any feed</h2>
-    <div class="consume-grid">
-      <div class="con-card">
-        <div class="con-h">Off-chain — the API</div>
-        <pre class="code"><span class="c-c"># all feeds</span>
-curl <span class="c-s">localhost:8080/api/feed</span>
-<span class="c-c"># one feed</span>
-curl <span class="c-s">localhost:8080/api/feed/KAS-USD</span></pre>
+  <div id="toast" class="toast" hidden></div>
+
+  <!-- ============ #/dev — API reference (hand-authored) ============ -->
+  <template id="tpl-dev">
+    <section class="sec">
+      <h2 class="section-h">API reference</h2>
+      <p class="section-sub">One JSON API, no auth, no keys, CORS-open (<code class="mono">Access-Control-Allow-Origin: *</code>). Base URL: this page&rsquo;s origin — a <code class="mono">*.run.app</code> origin for now, until a domain is chosen. Only the endpoints below exist; <code class="mono">/v1</code> is the canonical surface, the legacy <code class="mono">/api/*</code> aliases are permanent.</p>
+      <div class="api-layout">
+        <nav class="api-nav" id="api-nav">
+          <span class="grp">start</span>
+          <a href="#/dev" data-spy="ep-intro">introduction</a>
+          <a href="#/dev" data-spy="ep-message">the signed message</a>
+          <a href="#/dev" data-spy="ep-clients">zero-dep clients</a>
+          <span class="grp">feeds</span>
+          <a href="#/dev" data-spy="ep-feed">/v1/feed</a>
+          <a href="#/dev" data-spy="ep-feed-pair">/v1/feed/{PAIR}</a>
+          <a href="#/dev" data-spy="ep-feeds">/v1/feeds</a>
+          <span class="grp">health</span>
+          <a href="#/dev" data-spy="ep-health">/health</a>
+          <span class="grp">share</span>
+          <a href="#/dev" data-spy="ep-share">/share + /og</a>
+        </nav>
+        <div class="api-main">
+
+          <article class="api-endpoint" id="ep-intro">
+            <h3>Introduction</h3>
+            <p>kaspulse serves signed price feeds: each price is a median of independent venues, threshold-signed by a 5-node committee (3-of-5), and carries everything needed to verify it — the exact signed message, the signer pubkeys and the signatures. <b>Never trust the API — verify.</b> The oracle and its signatures are live and real; on-chain consumers are proven on Kaspa testnet-10, mainnet publishing is next.</p>
+            <p>All endpoints are <code class="mono">GET</code> (plus <code class="mono">HEAD</code>/<code class="mono">OPTIONS</code>); live data is served <code class="mono">Cache-Control: no-store</code>. Poll — there is deliberately no push stream.</p>
+            <div class="codebox"><pre class="code"><span class="c-c"># everything, one round, ~60 feeds</span>
+curl <span class="c-s">$ORIGIN/v1/feed</span>
+<span class="c-c"># one pair (dash form, case-insensitive)</span>
+curl <span class="c-s">$ORIGIN/v1/feed/KAS-USD</span>
+<span class="c-c"># light catalog for dashboards</span>
+curl <span class="c-s">$ORIGIN/v1/feeds</span></pre></div>
+          </article>
+
+          <article class="api-endpoint" id="ep-message">
+            <h3>The signed message</h3>
+            <p>The keystone of the whole API. For every feed, the committee signs the ASCII string</p>
+            <div class="codebox"><pre class="code">kaspulse/v2|PAIR|mant|expo|ts|round</pre></div>
+            <p>where <code class="mono">PAIR</code> is slash form (<code class="mono">KAS/USD</code>) and the rest are decimal integers (<code class="mono">expo</code> may be negative). The signed price is <b>mant × 10^expo</b> — exact at any magnitude. The digest is unkeyed <b>blake2b-256</b> of those ASCII bytes, and each node&rsquo;s signature is standard <b>BIP340 Schnorr</b> over that 32-byte digest as the message <i>m</i> (the digest is not hashed again outside BIP340&rsquo;s own tagged hashing). <code class="mono">signers[i]</code> are 32-byte x-only pubkeys, index-paired with <code class="mono">signatures[i]</code>.</p>
+            <p>Worked example, captured from a live round:</p>
+            <div class="codebox"><pre class="code"><span class="c-c"># the message string, verbatim from the feed:</span>
+kaspulse/v2|KAS/USD|295500000|-10|1783791092|183775
+<span class="c-c"># its blake2b-256 digest (this is BIP340's m):</span>
+0f86dadc725bf4cc21900ab008ee1f9d75884935d9e6a0e4a48db2f4d8cda88d</pre></div>
+            <p>A feed is VALID when <b>≥ threshold</b> signatures verify <b>and</b> the message&rsquo;s <code class="mono">PAIR|mant|expo|ts</code> fields equal the JSON&rsquo;s <code class="mono">pair</code>/<code class="mono">mant</code>/<code class="mono">expo</code>/<code class="mono">signed_ts</code> — the field binding stops a lying server from serving a price the signatures don&rsquo;t cover. Every kaspulse verifier checks both.</p>
+            <div class="codebox"><pre class="code"><span class="c-c">// JS (see clients/js/kaspulse.mjs for the real thing)</span>
+digest = blake2b256(utf8(feed.message))
+valid  = count(i =&gt; bip340_verify(feed.signers[i], digest, feed.signatures[i]))
+ok     = valid &gt;= feed.threshold &amp;&amp; fieldsBound(feed)</pre></div>
+            <div class="codebox"><pre class="code"><span class="c-c">// Rust — the SDK does all of it, binding included</span>
+<span class="c-k">let</span> feed = kaspulse_sdk::fetch(base, <span class="c-s">"KAS/USD"</span>)?;
+<span class="c-k">let</span> price = feed.checked_value_fresh(Duration::from_secs(<span class="c-s">30</span>))?;</pre></div>
+            <p class="dim" style="font-size:12.5px">Prices are signed on change plus a 5s heartbeat — <code class="mono">signed_ts</code>/<code class="mono">signed_round</code> belong to the signature, the envelope&rsquo;s <code class="mono">timestamp</code>/<code class="mono">round</code> to the serve tick. Full grammar: <a href="https://github.com/Knitser/kaspulse/blob/main/docs/MESSAGE-FORMAT.md" style="text-decoration:underline">docs/MESSAGE-FORMAT.md</a>.</p>
+          </article>
+
+          <article class="api-endpoint" id="ep-clients">
+            <h3>Zero-dependency clients</h3>
+            <p>One file each, no installs, no keys. Both fetch a feed AND verify it locally (signatures + field binding + freshness + safety flags), and both self-test their crypto core at load — a broken core refuses to verify rather than risk a fake ✓.</p>
+            <div class="codebox"><pre class="code"><span class="c-c"># JS — Node 18+ or the browser</span>
+curl -O <span class="c-s">https://raw.githubusercontent.com/Knitser/kaspulse/main/clients/js/kaspulse.mjs</span>
+node kaspulse.mjs verify KAS/USD <span class="c-s">$ORIGIN</span>
+
+<span class="c-c"># Python 3.9+ — stdlib only</span>
+curl -O <span class="c-s">https://raw.githubusercontent.com/Knitser/kaspulse/main/clients/py/kaspulse.py</span>
+python3 kaspulse.py verify KAS/USD <span class="c-s">$ORIGIN</span></pre></div>
+            <p>Honest scope: they verify the committee&rsquo;s signatures over the served message. They do <b>not</b> re-fetch the exchanges and recompute the median — that deeper audit is <code class="mono">cargo run --bin verify</code> in the repo.</p>
+          </article>
+
+          <article class="api-endpoint" id="ep-feed">
+            <h3>Full envelope</h3>
+            <div class="ep-route"><span class="method">GET</span><span class="ep-path">/v1/feed</span></div>
+            <p>Every feed, one round, one document — multi-hundred-KB with ~60 feeds. Permanent aliases: <code class="mono">/api/feed</code>, <code class="mono">/feed.json</code>. For dashboards, poll <a href="#/dev" data-spy-link="ep-feeds" style="text-decoration:underline">/v1/feeds</a> instead.</p>
+            <div class="codebox"><pre class="code">curl <span class="c-s">$ORIGIN/v1/feed</span></pre></div>
+            <div class="codebox"><pre class="code"><span class="c-c">// captured from a live round (feeds abridged)</span>
+{
+  "round": 183775, "timestamp": 1783791092,
+  "threshold": 3, "num_nodes": 5, "transport": "websocket",
+  "peg": { "igra_usdc": 0.99606, "igra_ok": true },
+  "feeds": [ <span class="c-c">/* ~60 × FeedObj — see /v1/feed/{PAIR} */</span> ]
+}</pre></div>
+            <div class="ep-table-wrap"><table class="ep-table">
+              <tr><th>field</th><th>type</th><th>meaning</th></tr>
+              <tr><td>round</td><td>u64</td><td>serve-tick round counter</td></tr>
+              <tr><td>timestamp</td><td>u64</td><td>serve-tick unix seconds</td></tr>
+              <tr><td>threshold</td><td>u32</td><td>signatures required per feed (3)</td></tr>
+              <tr><td>num_nodes</td><td>u32</td><td>committee size (5)</td></tr>
+              <tr><td>transport</td><td>str</td><td>how majors arrive ("websocket")</td></tr>
+              <tr><td>peg</td><td>obj</td><td>WKAS/USDC peg check on the Igra leg: <code>igra_usdc</code> (f64|null), <code>igra_ok</code> (bool|null)</td></tr>
+              <tr><td>feeds</td><td>[FeedObj]</td><td>all feeds — full shape below</td></tr>
+            </table></div>
+          </article>
+
+          <article class="api-endpoint" id="ep-feed-pair">
+            <h3>Single feed</h3>
+            <div class="ep-route"><span class="method">GET</span><span class="ep-path">/v1/feed/{PAIR}</span></div>
+            <p>One FeedObj. <code class="mono">PAIR</code> is dash form, case-insensitive: <code class="mono">KAS-USD</code> ↔ pair <code class="mono">"KAS/USD"</code>. Unknown pair → real HTTP <b>404</b> with body <code class="mono">{"error":"no such feed"}</code> (the legacy alias <code class="mono">/api/feed/{PAIR}</code> now 404s too). </p>
+            <div class="codebox"><pre class="code">curl <span class="c-s">$ORIGIN/v1/feed/KAS-USD</span></pre></div>
+            <div class="codebox"><pre class="code"><span class="c-c">// captured from a live round (arrays abridged)</span>
+{
+  "pair": "KAS/USD", "kind": "major",
+  "price": 0.02955, "price_e8": 2955000,
+  "mant": 295500000, "expo": -10,
+  "sources": [
+    { "name": "Gate.io", "price": 0.02955,  "age_ms": 12467 },
+    { "name": "KuCoin",  "price": 0.02955,  "age_ms": 12890 },
+    { "name": "MEXC",    "price": 0.029564, "age_ms": 12279 }
+  ],
+  "num_sources": 3, "outliers": [],
+  "halted": false, "degraded": false, "freshest_ms": 12279,
+  "low": 0.02955, "high": 0.029564, "spread_bps": 4.74,
+  "median": 0.02955, "twap": true, "liq_wkas": 0.0, "thin": false,
+  "signers": [ "0dd71bf25a98da9ff89a661537997fc9…", <span class="c-c">/* ×5 */</span> ],
+  "threshold": 3,
+  "signatures": [ "7eb9f2973d6976da3dc8bdc29d66e697…", <span class="c-c">/* ×5 */</span> ],
+  "message": "kaspulse/v2|KAS/USD|295500000|-10|1783791092|183775",
+  "signed_ts": 1783791092, "signed_round": 183775,
+  "history": [ [1783791030, 0.02955], <span class="c-c">/* ~120 [ts, price] points */</span> ]
+}</pre></div>
+            <p><b>The fields worth honoring.</b> A consumer that reads <code class="mono">price</code> and ignores the flags is doing it wrong — the flags are the oracle telling you when <i>not</i> to trust the number:</p>
+            <div class="ep-table-wrap"><table class="ep-table">
+              <tr><th>field</th><th>type</th><th>meaning</th></tr>
+              <tr><td>halted</td><td>bool</td><td>circuit breaker tripped — do not consume this round</td></tr>
+              <tr><td>thin</td><td>bool</td><td>shallow pool — price is real but easily moved; honor it</td></tr>
+              <tr><td>degraded</td><td>bool</td><td>fewer venues than nominal — widen your margins</td></tr>
+              <tr><td>peg_ok</td><td>bool</td><td>KRC-20 only — false when the WKAS/USDC peg looks off; absent on majors</td></tr>
+              <tr><td>freshest_ms</td><td>u64</td><td>age of the freshest venue at serve time</td></tr>
+              <tr><td>outliers</td><td>[str]</td><td>venues MAD-filtered out of this round&rsquo;s median</td></tr>
+            </table></div>
+            <p>Everything else:</p>
+            <div class="ep-table-wrap"><table class="ep-table">
+              <tr><th>field</th><th>type</th><th>meaning</th></tr>
+              <tr><td>pair / kind</td><td>str</td><td><code>"KAS/USD"</code> · <code>"major"</code> | <code>"krc20"</code></td></tr>
+              <tr><td>mant / expo</td><td>u64 / i32</td><td>the exact signed price: mant × 10^expo</td></tr>
+              <tr><td>price</td><td>f64</td><td>convenience float of mant × 10^expo — display only</td></tr>
+              <tr><td>price_e8</td><td>i64</td><td>price × 1e8 — the unit on-chain covenants gate on</td></tr>
+              <tr><td>sources</td><td>[obj]</td><td>per-venue {name, price, age_ms}</td></tr>
+              <tr><td>num_sources</td><td>usize</td><td>venues in the median after filtering</td></tr>
+              <tr><td>low / high / spread_bps / median</td><td>f64</td><td>venue range, spread (bps) and raw median this round</td></tr>
+              <tr><td>twap</td><td>bool</td><td>KRC-20 pool reads are time-weighted; always true today</td></tr>
+              <tr><td>liq_wkas</td><td>f64</td><td>pool depth in WKAS (KRC-20; 0 on majors)</td></tr>
+              <tr><td>signers / signatures</td><td>[hex]</td><td>5 x-only pubkeys / 5 BIP340 sigs, index-paired</td></tr>
+              <tr><td>threshold</td><td>u32</td><td>signatures required (3)</td></tr>
+              <tr><td>message</td><td>str</td><td>the exact signed string — see &ldquo;the signed message&rdquo;</td></tr>
+              <tr><td>signed_ts / signed_round</td><td>u64</td><td>what the signature covers (≠ envelope tick)</td></tr>
+              <tr><td>history</td><td>[[u64,f64]]</td><td>last ~120 [ts, price] points — the only history there is</td></tr>
+            </table></div>
+          </article>
+
+          <article class="api-endpoint" id="ep-feeds">
+            <h3>Catalog</h3>
+            <div class="ep-route"><span class="method">GET</span><span class="ep-path">/v1/feeds</span></div>
+            <p>The light board: one small row per pair, built once per round. This is what dashboards should poll. Catalog rows are <b>not signed</b> — verify a pair&rsquo;s full feed before acting on it.</p>
+            <div class="codebox"><pre class="code">curl <span class="c-s">$ORIGIN/v1/feeds</span></pre></div>
+            <div class="codebox"><pre class="code"><span class="c-c">// captured from a live round (rows abridged)</span>
+{
+  "round": 183775, "timestamp": 1783791092, "count": 61,
+  "feeds": [
+    { "pair": "KAS/USD", "kind": "major", "price": 0.02955,
+      "num_sources": 3, "halted": false, "degraded": false, "thin": false,
+      "liq_wkas": 0.0, "spread_bps": 4.74, "freshest_ms": 12279 },
+    { "pair": "yoni/USD", "kind": "krc20", "price": 7.863e-9,
+      "num_sources": 1, "halted": false, "degraded": false, "thin": true,
+      "liq_wkas": 224.0, "spread_bps": 0.0, "freshest_ms": 3120 }
+  ]
+}</pre></div>
+          </article>
+
+          <article class="api-endpoint" id="ep-health">
+            <h3>Health</h3>
+            <div class="ep-route"><span class="method">GET</span><span class="ep-path">/health</span></div>
+            <p>Liveness for uptime checks: status <b>200</b> when <code class="mono">ok</code>, <b>503</b> when not. <code class="mono">ok := build_age_ms &lt; 5000 &amp;&amp; feeds_total ≥ 1 &amp;&amp; feeds_live ≥ 1</code>.</p>
+            <div class="codebox"><pre class="code">curl <span class="c-s">$ORIGIN/health</span>
+<span class="c-c"># → {"ok":true,"round":183775,"uptime_s":86432,"build_age_ms":412,</span>
+<span class="c-c">#    "feeds_total":61,"feeds_live":61,"pools":58}</span></pre></div>
+          </article>
+
+          <article class="api-endpoint" id="ep-share">
+            <h3>Share pages &amp; OG cards</h3>
+            <div class="ep-route"><span class="method">GET</span><span class="ep-path">/share/{PAIR}</span></div>
+            <p>A crawler-visible page with OpenGraph meta (title, description, live price card) that redirects humans to the SPA&rsquo;s <code class="mono">#/feed/{PAIR}</code>. Paste it in a chat and it unfurls with a live price card. Unknown pair → 404.</p>
+            <div class="ep-route"><span class="method">GET</span><span class="ep-path">/og/{PAIR}.png</span></div>
+            <p>The 1200×630 card itself: pair, live price, sparkline, the trust line (<i>median of N venues · 3-of-5 signed</i>) and thin/halted badges rendered on the card. Only served by builds with the <code class="mono">og</code> feature (the deployed image); otherwise 404. Cached ~60s.</p>
+            <div class="codebox"><pre class="code">curl <span class="c-s">$ORIGIN/share/KAS-USD</span>
+curl -o card.png <span class="c-s">$ORIGIN/og/KAS-USD.png</span></pre></div>
+          </article>
+
+        </div>
       </div>
-      <div class="con-card">
-        <div class="con-h">On-chain — a covenant reads it</div>
-        <pre class="code"><span class="c-c">// release only when the oracle-signed</span>
-<span class="c-c">// price clears a strike — verified by L1:</span>
-OpDup [strike] <span class="c-k">OpGreaterThanOrEqual</span> OpVerify
-OpBlake2b [oraclePk] <span class="c-k">OpCheckSigFromStack</span></pre>
-      </div>
-      <div class="con-card">
-        <div class="con-h">Prove it's honest</div>
-        <pre class="code"><span class="c-c"># re-checks every signature AND</span>
-<span class="c-c"># re-fetches the exchanges itself</span>
-cargo run --bin <span class="c-s">verify</span>
-<span class="c-c"># → "honest feed — no trust required"</span></pre>
-      </div>
-    </div>
-  </section>
+    </section>
+  </template>
 
-  <footer class="foot"><span>kaspulse</span> · real-time price oracle for Kaspa · <span class="dim">median of live exchange feeds, threshold-signed &amp; verifiable</span></footer>
+  <!-- ============ #/docs — docs hub (hand-authored) ============ -->
+  <template id="tpl-docs">
+    <section class="sec">
+      <h2 class="section-h">Docs</h2>
+      <p class="section-sub">Everything is verifiable, everything is one file away. Start with the quickstart, graduate to the covenant guide.</p>
 
-  <div class="modal-veil" id="modal" hidden><div class="modal"><button class="modal-x" id="modal-x" aria-label="close">✕</button><div id="modal-body"></div></div></div>
-  <script src="app.js"></script>
+      <div class="docs-cards">
+        <a class="docs-card flag" href="/guide.html">
+          <div class="docs-card-h">The covenant guide <span class="badge proof">tested · real txids</span></div>
+          <p>From a signed price to a Kaspa covenant that enforces it — price gates, range settles and slashing, every step proven on testnet-10.</p>
+        </a>
+        <a class="docs-card" href="#/dev">
+          <div class="docs-card-h">API reference</div>
+          <p>The frozen /v1 surface: envelope, per-pair feeds, catalog, health, share cards — with the signed-message spec at the center.</p>
+        </a>
+        <a class="docs-card" href="https://github.com/Knitser/kaspulse/tree/main/sdk">
+          <div class="docs-card-h">Rust SDK — kaspulse-sdk 0.2</div>
+          <p>fetch + verify + checked_value_fresh in ~10 lines, plus the covenant recipes (gates, range settle, bond &amp; slash) as proven bytes.</p>
+        </a>
+        <a class="docs-card" href="https://github.com/Knitser/kaspulse/tree/main/clients">
+          <div class="docs-card-h">Zero-dep clients</div>
+          <p>kaspulse.mjs (Node/browser) and kaspulse.py (stdlib-only) — each one file that fetches AND cryptographically verifies a feed.</p>
+        </a>
+        <a class="docs-card" href="https://github.com/Knitser/kaspulse/blob/main/docs/OPERATOR.md">
+          <div class="docs-card-h">Run an operator</div>
+          <p>The standalone signer daemon: your own key, your own machine, your own market reads — plus the bond that keeps every operator honest.</p>
+        </a>
+      </div>
+
+      <h3 style="margin:0 0 12px">Quickstart — fetch, verify, use</h3>
+      <div class="int-tabs" id="qs-tabs">
+        <div class="tabbar">
+          <button data-tab="qs-js" class="active">JavaScript</button>
+          <button data-tab="qs-py">Python</button>
+          <button data-tab="qs-rs">Rust</button>
+        </div>
+        <div class="tabpane active" id="qs-js"><div class="codebox"><pre class="code"><span class="c-c">// kaspulse.mjs is one file, zero deps — grab it from the repo</span>
+<span class="c-k">import</span> { Kaspulse } <span class="c-k">from</span> <span class="c-s">'./kaspulse.mjs'</span>;
+
+<span class="c-k">const</span> k = <span class="c-k">new</span> Kaspulse(<span class="c-s">'$ORIGIN'</span>);
+<span class="c-k">const</span> feed = <span class="c-k">await</span> k.feed(<span class="c-s">'KAS/USD'</span>);
+
+<span class="c-c">// 3-of-5 BIP340 over blake2b-256, field-bound</span>
+<span class="c-k">const</span> r = k.verifyFeed(feed);
+console.log(<span class="c-s">`verified ${r.valid}/${feed.signers.length} — ok: ${r.ok}`</span>);
+
+<span class="c-c">// verified + fresh + not halted, or throws</span>
+<span class="c-k">const</span> px = k.checkedValue(feed);
+console.log(<span class="c-s">'KAS/USD ='</span>, px);</pre></div></div>
+        <div class="tabpane" id="qs-py"><div class="codebox"><pre class="code"><span class="c-c"># kaspulse.py is one file, stdlib only — grab it from the repo</span>
+<span class="c-k">from</span> kaspulse <span class="c-k">import</span> Kaspulse
+
+k = Kaspulse(<span class="c-s">'$ORIGIN'</span>)
+feed = k.feed(<span class="c-s">'KAS/USD'</span>)
+
+<span class="c-c"># {'ok': True, 'valid': 5, 'threshold': 3, 'bound': True, ...}</span>
+r = k.verify_feed(feed)
+<span class="c-k">print</span>(<span class="c-s">'verified'</span>, r[<span class="c-s">'valid'</span>], <span class="c-s">'of'</span>, <span class="c-k">len</span>(feed[<span class="c-s">'signers'</span>]), <span class="c-s">'— ok:'</span>, r[<span class="c-s">'ok'</span>])
+
+<span class="c-c"># verified + fresh + not halted, or ValueError</span>
+px = k.checked_value(feed)
+<span class="c-k">print</span>(<span class="c-s">'KAS/USD ='</span>, px)</pre></div></div>
+        <div class="tabpane" id="qs-rs"><div class="codebox"><pre class="code"><span class="c-c">// Cargo.toml — crates.io pending, git today:</span>
+<span class="c-c">// kaspulse-sdk = { git = "https://github.com/Knitser/kaspulse", package = "kaspulse-sdk" }</span>
+<span class="c-k">use</span> std::time::Duration;
+
+<span class="c-k">let</span> base = <span class="c-s">"$ORIGIN"</span>;
+<span class="c-k">let</span> feed = kaspulse_sdk::fetch(base, <span class="c-s">"KAS/USD"</span>)?;   <span class="c-c">// /v1/feed/KAS-USD</span>
+
+<span class="c-c">// sigs verified + message fields bound + &lt;30s old, or a typed error</span>
+<span class="c-k">match</span> feed.checked_value_fresh(Duration::from_secs(30)) {
+    Ok(price) =&gt; println!(<span class="c-s">"KAS/USD = {price}"</span>),
+    Err(why)  =&gt; eprintln!(<span class="c-s">"rejected: {why}"</span>),
+}</pre></div></div>
+      </div>
+
+      <div class="trust-strip">
+        <h3 style="margin:0">The trust model in 60 seconds</h3>
+        <p><b>Measured:</b> seven exchanges + 55+ DEX pools, MAD-filtered median, circuit breakers — no single venue can move a feed. <b>Signed:</b> 5 nodes, 3 must agree, Schnorr over <code class="mono">kaspulse/v2|PAIR|mant|expo|ts|round</code> — no single node can forge a price. <b>Verifiable:</b> every response carries the message, the keys and the signatures, so anyone — browsers, one-file scripts, or a Kaspa covenant at spend time — can check the math instead of trusting the server. Which is exactly what this button does:</p>
+        <div id="docs-verify"><button class="btn" id="docs-verify-btn">verify KAS/USD in my browser</button><div id="docs-verify-out"></div></div>
+      </div>
+    </section>
+  </template>
+
+  <script src="vendor/verify.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

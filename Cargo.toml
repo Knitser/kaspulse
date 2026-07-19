@@ -20,10 +20,18 @@ kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = 
 kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "98a4ccd8d200853787f227bd4536ac540cf34957", optional = true }
 kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "98a4ccd8d200853787f227bd4536ac540cf34957", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"], optional = true }
+kaspulse-sdk = { path = "sdk", features = ["covenant"], optional = true }
+
+# OG share cards (/og/{PAIR}.png) — SVG -> PNG. Optional so the default
+# `oracle` build stays lean; the Dockerfile builds with --features og.
+# Same version as kascov's proven render pipeline.
+resvg = { version = "0.45", optional = true }
 
 [features]
 # build the on-chain bin with:  cargo run --bin onchain --features onchain
-onchain = ["kaspa-wrpc-client", "kaspa-rpc-core", "kaspa-consensus-core", "kaspa-txscript", "kaspa-addresses", "tokio"]
+onchain = ["kaspa-wrpc-client", "kaspa-rpc-core", "kaspa-consensus-core", "kaspa-txscript", "kaspa-addresses", "tokio", "kaspulse-sdk"]
+# server-rendered OG share cards:  cargo build --bin oracle --features og
+og = ["dep:resvg"]
 
 [[bin]]
 name = "oracle"
@@ -69,3 +77,8 @@ required-features = ["onchain"]
 [[bin]]
 name = "signer"
 path = "src/signer.rs"
+
+[[bin]]
+name = "gate"
+path = "src/gate.rs"
+required-features = ["onchain"]

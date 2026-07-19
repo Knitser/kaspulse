@@ -1,8 +1,16 @@
 [package]
 name = "kaspulse-sdk"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Consume the kaspulse oracle — verify signed prices off-chain + build price-gated Kaspa covenants."
+license = "MIT"
+repository = "https://github.com/Knitser/kaspulse"
+keywords = ["kaspa", "oracle", "covenant", "schnorr", "krc20"]
+categories = ["cryptography::cryptocurrencies", "api-bindings"]
+# NOTE crates.io publishing is PENDING (see README §Install): the `covenant`
+# feature depends on a git rev of kaspa-txscript (covenants fork) which
+# crates.io does not accept. The default (off-chain verify) surface has no git
+# deps and is publishable as-is.
 
 [dependencies]
 ureq = { version = "2", features = ["json", "tls"] }
@@ -12,10 +20,20 @@ secp256k1 = { version = "0.29", features = ["global-context"] }
 blake2b_simd = "1"
 hex = "0.4"
 kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "98a4ccd8d200853787f227bd4536ac540cf34957", optional = true }
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "98a4ccd8d200853787f227bd4536ac540cf34957", optional = true }
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "98a4ccd8d200853787f227bd4536ac540cf34957", optional = true }
 
 [features]
 # covenant builders (needs the Kaspa script engine). off-chain verify works without it.
-covenant = ["kaspa-txscript"]
+covenant = ["kaspa-txscript", "kaspa-addresses", "kaspa-consensus-core"]
 
 [[example]]
 name = "verify_and_gate"
+
+[[example]]
+name = "threshold_gate"
+required-features = ["covenant"]
+
+[[example]]
+name = "catch_equivocation"
+required-features = ["covenant"]

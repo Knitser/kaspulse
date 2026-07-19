@@ -17,57 +17,29 @@
 //! (The honest node reclaims its bond via a separate timelock+checksig branch,
 //! omitted here — this bin proves the SLASHING path.)
 //!
+//! Script + records come from kaspulse-sdk (`covenant::bond`) — the SDK ships
+//! the byte-identical proven script; this bin exercises it in the script VM.
+//!
 //! Run: cargo run --bin slash --features onchain
 
 #![allow(deprecated)]
 use kaspa_consensus_core::hashing::sighash::SigHashReusedValuesUnsync;
+use kaspa_txscript::caches::Cache;
 use kaspa_txscript::zk_precompiles::tests::helpers::execute_p2sh_script;
-use kaspa_txscript::{caches::Cache, opcodes::codes::*, script_builder::ScriptBuilder};
+use kaspulse_sdk::covenant::bond::{attestation_record, bond_redeem, slash_witness};
 use secp256k1::{Keypair, Message, SECP256K1};
 
 fn blake32(b: &[u8]) -> [u8; 32] { let h = blake2b_simd::Params::new().hash_length(32).hash(b); let mut o = [0u8; 32]; o.copy_from_slice(h.as_bytes()); o }
 
 /// 24 bytes: slot(pairId[0..8] ‖ round_be[8..16]) ‖ price(mant_be[16..24])
-fn record(pair: &str, round: u64, mant: u64) -> Vec<u8> {
-    let mut r = blake32(pair.as_bytes())[..8].to_vec();
-    r.extend_from_slice(&round.to_be_bytes());
-    r.extend_from_slice(&mant.to_be_bytes());
-    r
-}
+fn record(pair: &str, round: u64, mant: u64) -> Vec<u8> { attestation_record(pair, round, mant).to_vec() }
 fn node_sign(kp: &Keypair, rec: &[u8]) -> Vec<u8> {
     kp.sign_schnorr(Message::from_digest_slice(&blake32(rec)).unwrap()).as_ref().to_vec()
 }
 
-/// The bond redeem — slashes iff two valid, same-slot, different-price records.
-/// Witness leaves [rec1, sig1, rec2, sig2] on the stack (sig2 top).
-fn redeem(npk: &[u8]) -> Vec<u8> {
-    let mut b = ScriptBuilder::new();
-    // verify sig2 over rec2, stashing a copy of rec2 on the alt-stack
-    b.add_op(OpSwap).unwrap().add_op(OpDup).unwrap().add_op(OpToAltStack).unwrap().add_op(OpBlake2b).unwrap()
-        .add_data(npk).unwrap().add_op(OpCheckSigFromStack).unwrap().add_op(OpVerify).unwrap();
-    // verify sig1 over rec1, stashing a copy of rec1
-    b.add_op(OpSwap).unwrap().add_op(OpDup).unwrap().add_op(OpToAltStack).unwrap().add_op(OpBlake2b).unwrap()
-        .add_data(npk).unwrap().add_op(OpCheckSigFromStack).unwrap().add_op(OpVerify).unwrap();
-    // restore rec1, rec2 → stack [rec1, rec2]
-    b.add_op(OpFromAltStack).unwrap().add_op(OpFromAltStack).unwrap();
-    // same slot?  rec1[0..16] == rec2[0..16]
-    b.add_op(Op2Dup).unwrap()
-        .add_i64(0).unwrap().add_i64(16).unwrap().add_op(OpSubstr).unwrap()          // slot2
-        .add_op(OpSwap).unwrap().add_i64(0).unwrap().add_i64(16).unwrap().add_op(OpSubstr).unwrap() // slot1
-        .add_op(OpEqualVerify).unwrap();
-    // different price?  rec1[16..24] != rec2[16..24]
-    b.add_i64(16).unwrap().add_i64(24).unwrap().add_op(OpSubstr).unwrap()            // price2
-        .add_op(OpSwap).unwrap().add_i64(16).unwrap().add_i64(24).unwrap().add_op(OpSubstr).unwrap() // price1
-        .add_op(OpEqual).unwrap().add_op(OpNot).unwrap();
-    b.drain()
-}
-fn witness(rec1: &[u8], sig1: &[u8], rec2: &[u8], sig2: &[u8], redeem: &[u8]) -> Vec<u8> {
-    ScriptBuilder::new().add_data(rec1).unwrap().add_data(sig1).unwrap().add_data(rec2).unwrap().add_data(sig2).unwrap()
-        .add_data(redeem).unwrap().drain()
-}
-fn try_slash(npk: &[u8], rec1: &[u8], sig1: &[u8], rec2: &[u8], sig2: &[u8]) -> bool {
-    let r = redeem(npk);
-    execute_p2sh_script(witness(rec1, sig1, rec2, sig2, &r), &r, &Cache::new(10), &SigHashReusedValuesUnsync::new()).is_ok()
+fn try_slash(npk: &[u8; 32], rec1: &[u8], sig1: &[u8], rec2: &[u8], sig2: &[u8]) -> bool {
+    let r = bond_redeem(npk);
+    execute_p2sh_script(slash_witness(rec1, sig1, rec2, sig2, &r), &r, &Cache::new(10), &SigHashReusedValuesUnsync::new()).is_ok()
 }
 
 fn main() {

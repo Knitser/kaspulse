@@ -10,6 +10,10 @@
 //!   OpFromAltStack <pk0> OpCheckSigFromStack        (3rd signer → final bool)
 //! (3-of-3 committee; any-3-of-5 subset selection is a further extension.)
 //!
+//! Script + witness come from kaspulse-sdk (`covenant::price_gate_redeem`,
+//! `price_gate_witness`, `price_bytes`) — the SDK ships the byte-identical
+//! script this bin proved on TN10.
+//!
 //! Run: cargo run --bin consumer_live --features onchain
 
 #![allow(deprecated)]
@@ -25,8 +29,9 @@ use kaspa_consensus_core::{
     tx::{ComputeCommit, MutableTransaction, Transaction, TransactionInput, TransactionOutpoint, TransactionOutput, UtxoEntry},
 };
 use kaspa_rpc_core::api::rpc::RpcApi;
-use kaspa_txscript::{extract_script_pub_key_address, opcodes::codes::*, pay_to_address_script, pay_to_script_hash_script, script_builder::ScriptBuilder};
+use kaspa_txscript::{pay_to_address_script, script_builder::ScriptBuilder};
 use kaspa_wrpc_client::{client::ConnectOptions, prelude::{NetworkId, NetworkType}, KaspaRpcClient, Resolver, WrpcEncoding};
+use kaspulse_sdk::covenant::{p2sh_address, p2sh_script, price_bytes, price_gate_redeem, price_gate_witness};
 use secp256k1::{Keypair, Message, SECP256K1};
 use std::time::Duration;
 
@@ -42,31 +47,11 @@ fn fetch_kas_e8() -> i64 {
     let med = if ps.is_empty() { 0.029 } else { ps[ps.len() / 2] };
     (med * 1e8).round() as i64
 }
-fn script_num(n: i64) -> Vec<u8> {
-    if n == 0 { return vec![]; }
-    let neg = n < 0; let mut abs = n.unsigned_abs(); let mut out = Vec::new();
-    while abs > 0 { out.push((abs & 0xff) as u8); abs >>= 8; }
-    if out.last().unwrap() & 0x80 != 0 { out.push(if neg { 0x80 } else { 0 }); } else if neg { *out.last_mut().unwrap() |= 0x80; }
-    out
-}
 fn blake32(b: &[u8]) -> [u8; 32] { let h = blake2b_simd::Params::new().hash_length(32).hash(b); let mut o = [0u8; 32]; o.copy_from_slice(h.as_bytes()); o }
 
 fn node_key(i: usize) -> Keypair {
     let raw = std::fs::read_to_string(format!("kaspulse-node-{i}.key")).expect("run the oracle once to create node keys");
     Keypair::from_secret_key(SECP256K1, &secp256k1::SecretKey::from_slice(&hex::decode(raw.trim()).unwrap()).unwrap())
-}
-fn redeem(pks: &[[u8; 32]; 3], strike: i64) -> Vec<u8> {
-    let mut b = ScriptBuilder::new();
-    b.add_op(OpDup).unwrap().add_i64(strike).unwrap().add_op(OpGreaterThanOrEqual).unwrap().add_op(OpVerify).unwrap()
-        .add_op(OpBlake2b).unwrap().add_op(OpToAltStack).unwrap();
-    // verify sig2, sig1 (abort-on-fail), keeping h on the alt stack
-    for pk in [&pks[2], &pks[1]] {
-        b.add_op(OpFromAltStack).unwrap().add_op(OpDup).unwrap().add_op(OpToAltStack).unwrap()
-            .add_data(pk).unwrap().add_op(OpCheckSigFromStack).unwrap().add_op(OpVerify).unwrap();
-    }
-    // verify sig0 — final signer leaves the result bool
-    b.add_op(OpFromAltStack).unwrap().add_data(&pks[0]).unwrap().add_op(OpCheckSigFromStack).unwrap();
-    b.drain()
 }
 
 fn load_key() -> Result<Keypair> {
@@ -88,22 +73,18 @@ async fn main() -> Result<()> {
     let me = addr_of(&key);
     let my_spk = pay_to_address_script(&me);
     let committee = [node_key(0), node_key(1), node_key(2)];
-    let pks: [[u8; 32]; 3] = [
-        committee[0].public_key().x_only_public_key().0.serialize(),
-        committee[1].public_key().x_only_public_key().0.serialize(),
-        committee[2].public_key().x_only_public_key().0.serialize(),
-    ];
+    let pks: Vec<[u8; 32]> = committee.iter().map(|k| k.public_key().x_only_public_key().0.serialize()).collect();
     let price_e8 = fetch_kas_e8();
     let strike: i64 = 2_000_000; // $0.02 — below market, so the payout triggers
     println!("KAS/USD = ${:.6}  ·  strike $0.02  ·  committee 3 oracle nodes", price_e8 as f64 / 1e8);
 
-    let price_bytes = script_num(price_e8);
-    let msg_hash = blake32(&price_bytes);
+    let pb = price_bytes(price_e8);
+    let msg_hash = blake32(&pb);
     let sigs: Vec<Vec<u8>> = committee.iter().map(|k| k.sign_schnorr(Message::from_digest_slice(&msg_hash).unwrap()).as_ref().to_vec()).collect();
 
-    let r = redeem(&pks, strike);
-    let p2sh = pay_to_script_hash_script(&r);
-    let p2sh_addr = extract_script_pub_key_address(&p2sh, Prefix::Testnet).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let r = price_gate_redeem(&pks, strike);
+    let p2sh = p2sh_script(&r);
+    let p2sh_addr = p2sh_address(&r, Prefix::Testnet).map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("threshold consumer P2SH: {p2sh_addr}");
 
     let client = connect().await?;
@@ -134,8 +115,8 @@ async fn main() -> Result<()> {
     let mine = client.get_utxos_by_addresses(vec![me.clone().into()]).await?;
     let feeu = mine.iter().filter(|u| u.utxo_entry.covenant_id.is_none() && u.utxo_entry.amount > 10_000_000).max_by_key(|u| u.utxo_entry.amount).context("no fee UTXO")?;
 
-    // witness (bottom→top): sig0, sig1, sig2, price_bytes
-    let sig_script = ScriptBuilder::new().add_data(&sigs[0])?.add_data(&sigs[1])?.add_data(&sigs[2])?.add_data(&price_bytes)?.add_data(&r)?.drain();
+    // witness (bottom→top): sig0, sig1, sig2, price_bytes, redeem
+    let sig_script = price_gate_witness(&sigs, price_e8, &r);
     let net_fee: u64 = 5_000_000;
     let payout = state.utxo_entry.amount + feeu.utxo_entry.amount - net_fee;
     let zk_in = TransactionInput::new_with_mass(TransactionOutpoint::new(state.outpoint.transaction_id, state.outpoint.index), vec![], 0, ComputeCommit::ComputeBudget(ComputeBudget(120)));

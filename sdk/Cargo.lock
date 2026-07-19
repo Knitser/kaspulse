@@ -1803,10 +1803,12 @@ dependencies = [
 
 [[package]]
 name = "kaspulse-sdk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake2b_simd",
  "hex",
+ "kaspa-addresses",
+ "kaspa-consensus-core",
  "kaspa-txscript",
  "secp256k1",
  "serde",

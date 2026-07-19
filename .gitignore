@@ -2,3 +2,4 @@
 *.key
 web/feed.json
 sdk/target
+__pycache__/
