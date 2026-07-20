@@ -5,32 +5,39 @@ The `oracle` binary serves BOTH the dashboard and the JSON API on `$PORT`
 proxy), so one process is the whole public service: one stateful singleton
 (live exchange WebSockets + the in-memory signing state) that must run 24/7.
 
-## ACTIVE topology (chosen 2026-07-19): VPS + kaspulse.web.app
+## ACTIVE topology (chosen 2026-07-20): pulse.kascov.io on the Windows VPS
 
-The oracle runs on a VPS; the public URL is **https://kaspulse.web.app**
-(Firebase Hosting site `kaspulse` in `kascov-explorer`, already created).
-Hosting can only rewrite to Cloud Run, so a scale-to-zero Caddy proxy
-bridges to the VPS:
+The oracle runs on the existing **Windows Server VPS (157.90.7.39)** — the
+same box that already serves `ironwood.live` behind **Caddy** (auto Let's
+Encrypt TLS). kaspulse gets its own subdomain of the domain we already own,
+pointed straight at the VPS — no Cloud Run, no Firebase in the path:
 
 ```
-kaspulse.web.app → Cloud Run kaspulse-proxy (min-instances 0, pennies)
-                 → https://<ip-dashes>.sslip.io (Caddy on the VPS, free LE TLS)
-                 → 127.0.0.1:8080 (oracle, systemd, KASPULSE_REQUIRE_KEYS=1)
+pulse.kascov.io → A record (Squarespace DNS) → 157.90.7.39
+               → Caddy on the VPS (shared with ironwood.live, auto-TLS)
+               → 127.0.0.1:<port> (oracle service, KASPULSE_BIND=127.0.0.1,
+                 KASPULSE_REQUIRE_KEYS=1, BASE_URL=https://pulse.kascov.io)
 ```
 
-Three idempotent scripts, run in order from the repo root (the machine
-holding the committee key files):
+Two steps to go live:
 
-```sh
-./deploy/vps/deploy-vps.sh user@host        # build + keys + systemd + caddy
-./deploy/proxy/deploy-proxy.sh <sslip-host> # printed by the previous step
-./deploy/hosting/deploy-hosting.sh          # points kaspulse.web.app at it
-```
+1. **DNS (Squarespace dashboard):** add an `A` record — Host `pulse`,
+   Value `157.90.7.39`. (kascov.io's nameservers are `nsd1–4.squarespacedns.com`.)
+2. **VPS:** build the release, run `oracle` as a Windows service (same
+   service manager as ironwood.live), drop the five committee key files
+   next to it (`scp`, never git; `KASPULSE_REQUIRE_KEYS=1` fails closed if
+   absent), and add ONE site block to the shared Caddyfile:
+   `pulse.kascov.io { reverse_proxy 127.0.0.1:<port> }`, then reload Caddy.
+   Caddy provisions the certificate on the first request.
 
-Committee keys travel by `scp` in step 1 (never through git); the systemd
-unit sets `BASE_URL=https://kaspulse.web.app` so share/OG/sitemap links are
-branded. Re-run step 1 to update after a `git push`; re-run step 2 only if
-the VPS IP changes.
+> The VPS is Windows, so the `deploy/vps/*.sh` + systemd unit below are a
+> Linux REFERENCE; the live box mirrors ironwood.live's Windows service +
+> shared-Caddy setup. Exact Windows commands are finalized against the live
+> box (must not disturb the running ironwood.live Caddy site).
+
+`deploy/proxy/` and `deploy/hosting/` are an **ALTERNATIVE (Cloud Run +
+kaspulse.web.app)** fallback, only if the oracle ever moves off the VPS —
+not used by the active topology above.
 
 ---
 

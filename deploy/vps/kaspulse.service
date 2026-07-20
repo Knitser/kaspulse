@@ -13,7 +13,7 @@ ExecStart=__APP_DIR__/target/release/oracle
 Environment=PORT=8080
 Environment=KASPULSE_BIND=127.0.0.1
 Environment=KASPULSE_REQUIRE_KEYS=1
-Environment=BASE_URL=https://kaspulse.web.app
+Environment=BASE_URL=https://pulse.kascov.io
 Restart=always
 RestartSec=3
 # the oracle holds live exchange WebSockets — give it time to drain on stop
