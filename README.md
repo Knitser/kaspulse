@@ -52,26 +52,24 @@ this (~100 ms blocks, no leader to front-run an oracle update):
 ## Status, honestly
 
 *This is the one canonical status block — every other kaspulse page links here
-instead of restating it. As of July 2026:*
+instead of restating it:*
 
 - **The oracle, the signatures and every number it serves are live and real**
   — verify one yourself: the site's verify button, `clients/py/kaspulse.py`,
-  or `cargo run --bin verify`.
+  or `cargo run --bin verify`. Live at https://pulse.kascov.io.
 - **On-chain consumers are proven on Kaspa testnet-10** — threshold
   price-gated spends and equivocation slashing ran on the real chain (proof
-  table below). **Mainnet publishing is next**; kaspulse has not published to
-  mainnet.
-- **The hosted committee's 5 keys currently sign in one process.** The
-  cryptography is the real 3-of-5; the *deployment* is not yet 5 independent
-  operators. The standalone signer daemon
-  ([docs/OPERATOR.md](docs/OPERATOR.md)) is the path there, and 3 separate
-  signers have been proven.
-- **The covenant guide uses a demo committee.** The hosted committee signs the
-  API message string (which browsers, clients and the SDK verify); the
-  on-chain covenant flow verifies signatures over `blake2b(price_bytes)`,
-  produced in the guide by a locally-generated demo committee, honestly
-  labeled. Hosted-committee covenant signatures are roadmap.
-- Not financial infrastructure yet — don't secure real value with it.
+  table below). Standing feeds: `cargo run --bin standing --features onchain`
+  (deviation + heartbeat). **Mainnet publishing is next.**
+- **The hosted committee's 5 keys currently sign in one process** by default.
+  Set `KASPULSE_OPERATORS` to poll independent `signer` `/attest` endpoints
+  ([docs/OPERATOR.md](docs/OPERATOR.md)); cryptography is real 3-of-5.
+- **Hosted dual attestation shipped.** Each feed carries `covenant.signatures`
+  over `blake2b(price_bytes)` plus bond `record` sigs; pin keys via
+  `/v1/committee` + `Feed::verify_with_committee`. The guide's local demo
+  committee remains the offline walkthrough.
+- Not financial infrastructure yet — don't secure real value with it until
+  multi-host operators + mainnet standing feeds are live.
 
 ---
 

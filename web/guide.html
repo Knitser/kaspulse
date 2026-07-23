@@ -173,16 +173,19 @@
     </p>
     <div class="honest" id="honest">
       <strong>Read this before you start.</strong> Every command below is real: the oracle outputs
-      on this page were captured from live runs in July 2026, and the covenant and slashing flows
+      on this page were captured from live runs, and the covenant and slashing flows
       are the same code this repo proved on testnet-10 (<code>consumer_live</code>,
       <code>slash_live</code>). Testnet runs are ephemeral, so no stale txids are pinned here —
       wherever you see a <code>‹value›</code> in angle quotes, the tool prints your own fresh one,
-      explorer-linked, as you run. Two things to know: <strong>(1)</strong> the covenant in this
-      guide uses a 3-key <em>demo committee</em> you generate locally, because the hosted committee
-      signs the API message format, not the on-chain price encoding — hosted-committee covenants
-      are on the roadmap; <strong>(2)</strong> on-chain consumers are proven on
-      <em>testnet-10</em>; kaspulse has not published to mainnet. When that changes, this box
-      changes. (The one canonical status block is the README's <em>“Status, honestly”</em> section —
+      explorer-linked, as you run. Two things to know: <strong>(1)</strong> the hosted committee
+      now dual-signs — the API message format <em>and</em> <code>blake2b(price_bytes)</code>
+      under each feed's <code>covenant</code> object (see <code>/v1/committee</code> +
+      <code>Feed::verify_covenant</code>). This guide's local 3-key <em>demo committee</em>
+      remains the offline walkthrough; production gates should use hosted covenant sigs.
+      <strong>(2)</strong> on-chain consumers are proven on
+      <em>testnet-10</em>; standing feeds via <code>cargo run --bin standing --features onchain</code>
+      publish to TN10 on deviation + heartbeat. Mainnet publish is next.
+      (The one canonical status block is the README's <em>“Status, honestly”</em> section —
       this box makes the same claims, never stronger.)
       In the code blocks: <span style="color:var(--green)">green lines</span> are tool output as
       captured; <span style="color:var(--faint)">grey</span> are comments.

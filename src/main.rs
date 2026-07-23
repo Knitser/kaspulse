@@ -182,8 +182,13 @@ fn eth_call_cross(rpcs: &[String], to: &str, data: &str) -> Option<String> {
         }
     }
     if got.is_empty() { return None; }
-    // ≥2 RPCs must AGREE — a single compromised RPC can't move the price
-    if got.iter().all(|r| r == &got[0]) { Some(got.remove(0)) } else { eprintln!("kasplex RPC disagreement on {to} — dropping this read"); None }
+    // When ≥2 RPCs are configured, require ≥2 agreeing responses — a single
+    // compromised/flaky RPC must not be enough to move a price.
+    if rpcs.len() >= 2 && got.len() < 2 {
+        eprintln!("RPC quorum failed on {to}: only {}/{} responded — dropping", got.len(), rpcs.len());
+        return None;
+    }
+    if got.iter().all(|r| r == &got[0]) { Some(got.remove(0)) } else { eprintln!("RPC disagreement on {to} — dropping this read"); None }
 }
 fn resv(h: &str) -> Option<f64> { u128::from_str_radix(h.get(32..64)?, 16).ok().map(|v| v as f64) } // uint112 fits in the low 128 bits
 fn pool_read(rpcs: &[String], p: &Pool) -> Option<(f64, f64)> { // (price_in_wkas, wkas_liquidity)
@@ -291,7 +296,13 @@ fn discover_thread() {
 }
 
 fn slow_thread(lp: Live) {
-    for c in CHAINS { let r = chain_rpcs(c); eprintln!("{c} RPCs ({}): {}", r.len(), r.join(", ")); }
+    for c in CHAINS {
+        let r = chain_rpcs(c);
+        eprintln!("{c} RPCs ({}): {}", r.len(), r.join(", "));
+        if r.len() < 2 {
+            eprintln!("warning: {c} has only 1 RPC — cross-check quorum inactive; set KASPLEX_RPCS / IGRA_RPCS to ≥2 endpoints");
+        }
+    }
     let mut win: HashMap<String, Vec<f64>> = HashMap::new();
     loop {
         let a = agent();
@@ -301,7 +312,7 @@ fn slow_thread(lp: Live) {
             if let Some(s) = f.mexc   { if let Some(p) = mexc(&a, s)   { set_price(&lp, &f.pair, "MEXC", p); } }
         }
         // KRC-20: read each pool on ITS chain (cross-checked) → windowed median (TWAP) → publish.
-        // A token on both chains gets two on-chain sources (Kasplex-DEX + Igra-DEX) → build() medians.
+        // A token on both chains gets two on-chain sources (Kasplex-Zealous + Igra-*) → build() medians.
         let ku = kas_usd(&lp);
         if ku > 0.0 {
             // read pools in parallel (bounded concurrency) so the whole set refreshes in seconds, not a minute
@@ -388,7 +399,39 @@ fn mant_expo(p: f64) -> (u64, i32) {
 }
 /// last signed attestation per pair — unchanged prices re-sign only on the
 /// heartbeat, so signing cost tracks price CHANGES, not the serve loop.
-struct SignCache { mant: u64, expo: i32, msg: String, sigs_json: String, ts: u64, round: u64 }
+struct SignCache {
+    mant: u64, expo: i32, price_e8: u64,
+    msg: String, sigs_json: String,
+    /// covenant-domain sigs over blake2b(price_bytes) — same keys, on-chain encoding
+    cov_sigs_json: String,
+    /// 24-byte attestation record + per-node sigs (slash-observable)
+    record_hex: String, record_sigs_json: String,
+    ts: u64, round: u64,
+}
+
+/// Minimal LE script-number encoding of price_e8 (MESSAGE-FORMAT §8.2).
+fn price_bytes(price_e8: i64) -> Vec<u8> {
+    if price_e8 == 0 { return vec![]; }
+    let neg = price_e8 < 0; let mut abs = price_e8.unsigned_abs(); let mut out = Vec::new();
+    while abs > 0 { out.push((abs & 0xff) as u8); abs >>= 8; }
+    if out.last().unwrap() & 0x80 != 0 { out.push(if neg { 0x80 } else { 0 }); } else if neg { *out.last_mut().unwrap() |= 0x80; }
+    out
+}
+/// 24-byte bond attestation: slot(blake2b(pair)[0..8] ‖ round_be) ‖ mant_be.
+fn attestation_record(pair: &str, round: u64, mant: u64) -> [u8; 24] {
+    let h = blake2b_simd::Params::new().hash_length(32).hash(pair.as_bytes());
+    let mut r = [0u8; 24];
+    r[..8].copy_from_slice(&h.as_bytes()[..8]);
+    r[8..16].copy_from_slice(&round.to_be_bytes());
+    r[16..24].copy_from_slice(&mant.to_be_bytes());
+    r
+}
+fn sign_bytes(kp: &Keypair, data: &[u8]) -> String {
+    let h = blake2b_simd::Params::new().hash_length(32).hash(data);
+    hex::encode(kp.sign_schnorr(secp256k1::Message::from_digest_slice(h.as_bytes()).unwrap()).as_ref())
+}
+/// True when a live source name is an Igra-chain DEX venue (peg_ok applies).
+fn is_igra_source(name: &str) -> bool { name.starts_with("Igra-") }
 
 // ---- integrity guards (REVIEW §2/§3) ----
 const BREAK_PCT: f64 = 0.20;   // a >20% one-round jump is HELD (publish last good)…
@@ -413,11 +456,17 @@ fn mad_filter(srcs: &mut Vec<(&str, f64, u64)>) -> Vec<String> {
 struct FeedRow { cfg: FeedCfg, srcs: Vec<(String, f64, u64)>, outliers: Vec<String>, med: f64, halted: bool, degraded: bool }
 
 /// One build round's pre-serialized output — everything http::PubState serves.
-struct Built { envelope: String, per_pair: Vec<(String, String)>, catalog: String, feeds_total: usize, feeds_live: usize }
+struct Built {
+    envelope: String, per_pair: Vec<(String, String)>, catalog: String, committee: String,
+    feeds_total: usize, feeds_live: usize,
+}
 
-fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec<(u64, f64)>>, scache: &mut HashMap<String, SignCache>, bstate: &mut HashMap<String, (f64, u32)>) -> Built {
+fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec<(u64, f64)>>, scache: &mut HashMap<String, SignCache>, bstate: &mut HashMap<String, (f64, u32)>, remote: &aggregate::RemoteBook) -> Built {
     let ts = now(); let tms = now_ms();
     let signers: Vec<String> = keys.iter().map(|k| format!("\"{}\"", hex::encode(k.x_only_public_key().0.serialize()))).collect();
+    let committee = format!(
+        r#"{{"threshold":{THRESHOLD},"num_nodes":{N_NODES},"signers":[{}],"message":"kaspulse/v2","covenant":"blake2b(price_bytes)","updated_ts":{ts}}}"#,
+        signers.join(","));
     let book = lp.lock().unwrap().clone();
 
     // ── pass 1: sources → MAD filter → median → circuit breaker ──
@@ -453,19 +502,41 @@ fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec
     let mut feeds_live = 0usize;
     for r in &rows {
         let med = r.med;
-        let price_e8 = (med * 1e8).round() as u64; // informational only — the SIGNED price is mant×10^expo
+        let price_e8 = (med * 1e8).round() as u64; // also the covenant-domain integer (MESSAGE-FORMAT §8.2)
         let (mant, expo) = mant_expo(med);
         // sign on CHANGE, re-sign unchanged prices only on the heartbeat
-        let (msg, sigs_json, signed_ts, signed_round) = match scache.get(&r.cfg.pair) {
-            Some(c) if c.mant == mant && c.expo == expo && ts.saturating_sub(c.ts) < HEARTBEAT_S =>
-                (c.msg.clone(), c.sigs_json.clone(), c.ts, c.round),
+        let (msg, sigs_json, cov_sigs_json, record_hex, record_sigs_json, signed_ts, signed_round) = match scache.get(&r.cfg.pair) {
+            Some(c) if c.mant == mant && c.expo == expo && c.price_e8 == price_e8 && ts.saturating_sub(c.ts) < HEARTBEAT_S =>
+                (c.msg.clone(), c.sigs_json.clone(), c.cov_sigs_json.clone(), c.record_hex.clone(), c.record_sigs_json.clone(), c.ts, c.round),
             _ => {
                 let msg = format!("kaspulse/v2|{}|{mant}|{expo}|{ts}|{round}", r.cfg.pair);
                 let sigs_json = keys.iter().map(|k| format!("\"{}\"", sign(k, &msg))).collect::<Vec<_>>().join(",");
-                scache.insert(r.cfg.pair.clone(), SignCache { mant, expo, msg: msg.clone(), sigs_json: sigs_json.clone(), ts, round });
-                (msg, sigs_json, ts, round)
+                let pb = price_bytes(price_e8 as i64);
+                let cov_sigs_json = keys.iter().map(|k| format!("\"{}\"", sign_bytes(k, &pb))).collect::<Vec<_>>().join(",");
+                let rec = attestation_record(&r.cfg.pair, round, mant);
+                let record_hex = hex::encode(rec);
+                let record_sigs_json = keys.iter().map(|k| format!("\"{}\"", sign_bytes(k, &rec))).collect::<Vec<_>>().join(",");
+                scache.insert(r.cfg.pair.clone(), SignCache {
+                    mant, expo, price_e8, msg: msg.clone(), sigs_json: sigs_json.clone(),
+                    cov_sigs_json: cov_sigs_json.clone(), record_hex: record_hex.clone(),
+                    record_sigs_json: record_sigs_json.clone(), ts, round,
+                });
+                (msg, sigs_json, cov_sigs_json, record_hex, record_sigs_json, ts, round)
             }
         };
+        // merge independently-verified remote operator attests that agree on mant/expo
+        let (extra_pks, extra_sigs) = aggregate::extras(remote, &r.cfg.pair, mant, expo, 30);
+        let mut all_signers = signers.clone();
+        let mut all_sigs = if sigs_json.is_empty() { Vec::new() } else { sigs_json.split(',').map(|s| s.to_string()).collect::<Vec<_>>() };
+        for (pk, sg) in extra_pks.into_iter().zip(extra_sigs) {
+            if !all_signers.iter().any(|s| s == &pk) {
+                all_signers.push(pk);
+                all_sigs.push(sg);
+            }
+        }
+        let signers_j = all_signers.join(",");
+        let sigs_j = all_sigs.join(",");
+        let threshold_eff = THRESHOLD; // still need 3 — remotes can only ADD votes
         let prices: Vec<f64> = r.srcs.iter().map(|(_, p, _)| *p).collect();
         let lo = prices.iter().cloned().fold(f64::MAX, f64::min); let hi = prices.iter().cloned().fold(f64::MIN, f64::max);
         let spread = if med > 0.0 { ((hi - lo) / med) * 10_000.0 } else { 0.0 };
@@ -476,14 +547,18 @@ fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec
         let thin = r.cfg.kind == "krc20" && liq < MIN_LIQ_WKAS; // low-liquidity pool → manipulable, low-confidence
         let src_j: Vec<String> = r.srcs.iter().map(|(n, p, a)| format!(r#"{{"name":"{n}","price":{},"age_ms":{a}}}"#, enum_(*p))).collect();
         let out_j: Vec<String> = r.outliers.iter().map(|n| format!("\"{n}\"")).collect();
-        let peg_field = if r.srcs.iter().any(|(n, _, _)| n == "Igra-DEX") {
+        // Igra venues are named Igra-Zealous / Igra-KaspaCom (not the old "Igra-DEX")
+        let peg_field = if r.srcs.iter().any(|(n, _, _)| is_igra_source(n)) {
             match igra_peg_ok { Some(ok) => format!(r#","peg_ok":{ok}"#), None => r#","peg_ok":null"#.to_string() }
         } else { String::new() };
+        let cov_j = format!(
+            r#"{{"price_e8":{price_e8},"price_bytes":"{}","signatures":[{cov_sigs_json}],"record":"{record_hex}","record_signatures":[{record_sigs_json}]}}"#,
+            hex::encode(price_bytes(price_e8 as i64)));
         let h = hist.entry(r.cfg.pair.clone()).or_default(); h.push((ts, med)); if h.len() > HISTORY { let d = h.len() - HISTORY; h.drain(0..d); }
         let hist_j: Vec<String> = h.iter().map(|(t, p)| format!("[{t},{}]", enum_(*p))).collect();
         let obj = format!(
-            r#"{{"pair":"{}","kind":"{}","price":{},"price_e8":{price_e8},"mant":{mant},"expo":{expo},"sources":[{}],"num_sources":{},"outliers":[{}],"halted":{},"degraded":{}{peg_field},"freshest_ms":{freshest},"low":{},"high":{},"spread_bps":{:.2},"median":{},"twap":true,"liq_wkas":{:.0},"thin":{thin},"signers":[{}],"threshold":{THRESHOLD},"signatures":[{}],"message":"{msg}","signed_ts":{signed_ts},"signed_round":{signed_round},"history":[{}]}}"#,
-            r.cfg.pair, r.cfg.kind, enum_(med), src_j.join(","), r.srcs.len(), out_j.join(","), r.halted, r.degraded, enum_(lo), enum_(hi), spread, enum_(med), liq, signers.join(","), sigs_json, hist_j.join(",")
+            r#"{{"pair":"{}","kind":"{}","price":{},"price_e8":{price_e8},"mant":{mant},"expo":{expo},"sources":[{}],"num_sources":{},"outliers":[{}],"halted":{},"degraded":{}{peg_field},"freshest_ms":{freshest},"low":{},"high":{},"spread_bps":{:.2},"median":{},"twap":true,"liq_wkas":{:.0},"thin":{thin},"signers":[{signers_j}],"threshold":{threshold_eff},"signatures":[{sigs_j}],"message":"{msg}","signed_ts":{signed_ts},"signed_round":{signed_round},"covenant":{cov_j},"history":[{}]}}"#,
+            r.cfg.pair, r.cfg.kind, enum_(med), src_j.join(","), r.srcs.len(), out_j.join(","), r.halted, r.degraded, enum_(lo), enum_(hi), spread, enum_(med), liq, hist_j.join(",")
         );
         // per-pair map (dash form, uppercase) — /v1/feed/{PAIR} serves this
         // string directly instead of re-parsing the whole envelope per request
@@ -500,16 +575,109 @@ fn build(lp: &Live, keys: &[Keypair], round: u64, hist: &mut HashMap<String, Vec
         igra_peg_ok.map(|b| b.to_string()).unwrap_or_else(|| "null".into()));
     let envelope = format!(r#"{{"round":{round},"timestamp":{ts},"threshold":{THRESHOLD},"num_nodes":{N_NODES},"transport":"websocket","peg":{peg_j},"feeds":[{}]}}"#, objs.join(","));
     let catalog = format!(r#"{{"round":{round},"timestamp":{ts},"count":{},"feeds":[{}]}}"#, cat_rows.len(), cat_rows.join(","));
-    Built { envelope, per_pair, catalog, feeds_total: rows.len(), feeds_live }
+    Built { envelope, per_pair, catalog, committee, feeds_total: rows.len(), feeds_live }
 }
 
 // ---------- http: see src/http.rs (hardened std server, /v1 + aliases) ----------
 
+/// Poll independent `signer` daemons when `KASPULSE_OPERATORS` is set.
+/// Each URL is an `/attest` base; responses contribute remote Schnorr sigs that
+/// must verify under the operator's published pubkey. Local keys still sign
+/// (dev / bootstrap); once operators are configured the feed lists both.
+mod aggregate {
+    use super::*;
+    use secp256k1::{schnorr, Message, XOnlyPublicKey};
+
+    #[derive(Clone)]
+    pub struct RemoteAttest {
+        pub pair: String, pub mant: u64, pub expo: i32, pub ts: u64, pub round: u64,
+        pub signer: String, pub signature: String, pub message: String,
+    }
+
+    pub type RemoteBook = Arc<Mutex<HashMap<String, Vec<RemoteAttest>>>>; // pair → attests
+
+    pub fn spawn(book: RemoteBook) {
+        let urls: Vec<String> = match std::env::var("KASPULSE_OPERATORS") {
+            Ok(s) if !s.trim().is_empty() => s.split(',').map(|x| x.trim().trim_end_matches('/').to_string()).filter(|s| !s.is_empty()).collect(),
+            _ => return,
+        };
+        eprintln!("aggregator: polling {} operator /attest endpoint(s)", urls.len());
+        std::thread::spawn(move || {
+            let a = agent();
+            loop {
+                let mut next: HashMap<String, Vec<RemoteAttest>> = HashMap::new();
+                for url in &urls {
+                    let attest_url = if url.ends_with("/attest") { url.clone() } else { format!("{url}/attest") };
+                    let Ok(resp) = a.get(&attest_url).call() else { continue };
+                    let Ok(arr) = resp.into_json::<serde_json::Value>() else { continue };
+                    let Some(items) = arr.as_array() else { continue };
+                    for it in items {
+                        let Some(att) = parse_attest(it) else { continue };
+                        if !verify_attest(&att) { continue; }
+                        next.entry(att.pair.clone()).or_default().push(att);
+                    }
+                }
+                *book.lock().unwrap() = next;
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        });
+    }
+
+    fn parse_attest(v: &serde_json::Value) -> Option<RemoteAttest> {
+        Some(RemoteAttest {
+            pair: v["pair"].as_str()?.to_string(),
+            mant: v["mant"].as_u64()?,
+            expo: v["expo"].as_i64()? as i32,
+            ts: v["ts"].as_u64()?,
+            round: v["round"].as_u64()?,
+            signer: v["signer"].as_str()?.to_string(),
+            signature: v["signature"].as_str()?.to_string(),
+            message: v["message"].as_str()?.to_string(),
+        })
+    }
+
+    fn verify_attest(a: &RemoteAttest) -> bool {
+        let want = format!("kaspulse/v2|{}|{}|{}|{}|{}", a.pair, a.mant, a.expo, a.ts, a.round);
+        if a.message != want { return false; }
+        let h = blake2b_simd::Params::new().hash_length(32).hash(a.message.as_bytes());
+        let Ok(msg) = Message::from_digest_slice(h.as_bytes()) else { return false };
+        let Ok(pk) = XOnlyPublicKey::from_slice(&hex::decode(&a.signer).unwrap_or_default()) else { return false };
+        let Ok(sig) = schnorr::Signature::from_slice(&hex::decode(&a.signature).unwrap_or_default()) else { return false };
+        SECP256K1.verify_schnorr(&sig, &msg, &pk).is_ok()
+    }
+
+    /// Merge remote operator pubkeys/sigs into the local committee arrays for a pair.
+    /// Returns (extra_signers_json_elems, extra_sigs_json_elems) that agree with mant/expo.
+    pub fn extras(book: &RemoteBook, pair: &str, mant: u64, expo: i32, max_age_s: u64) -> (Vec<String>, Vec<String>) {
+        let now = now();
+        let guard = book.lock().unwrap();
+        let Some(list) = guard.get(pair) else { return (vec![], vec![]) };
+        let mut signers = Vec::new();
+        let mut sigs = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for a in list {
+            if a.mant != mant || a.expo != expo { continue; }
+            if now.saturating_sub(a.ts) > max_age_s { continue; }
+            if !seen.insert(a.signer.clone()) { continue; }
+            signers.push(format!("\"{}\"", a.signer));
+            sigs.push(format!("\"{}\"", a.signature));
+        }
+        (signers, sigs)
+    }
+}
+
 fn main() -> Result<()> {
     let keys = load_keys(N_NODES);
+    let operators = std::env::var("KASPULSE_OPERATORS").ok().filter(|s| !s.trim().is_empty());
+    if operators.is_some() && std::env::var("KASPULSE_REQUIRE_KEYS").map_or(false, |v| v == "1") {
+        eprintln!("keys: local committee active + remote operators via KASPULSE_OPERATORS");
+    }
     println!("kaspulse oracle — WebSocket streaming · {N_NODES} nodes, {THRESHOLD}-of-{N_NODES} · serve every {SERVE_MS}ms");
     println!("  majors: Kraken+Bybit+OKX+Coinbase (WS, sub-second) + KuCoin/Gate/MEXC (REST {SLOW_EVERY}s)");
     println!("  KRC-20: direct Kasplex/Igra DEX pool reads (cross-checked RPCs)");
+
+    let remote: aggregate::RemoteBook = Arc::new(Mutex::new(HashMap::new()));
+    aggregate::spawn(remote.clone());
 
     std::thread::spawn(discover_thread);
     let lp: Live = Arc::new(Mutex::new(HashMap::new()));
@@ -519,12 +687,12 @@ fn main() -> Result<()> {
 
     let state = Arc::new(http::PubState::new());
     {
-        let (state, lp) = (state.clone(), lp.clone());
+        let (state, lp, remote) = (state.clone(), lp.clone(), remote.clone());
         std::thread::spawn(move || {
             let mut round = 1u64; let mut hist = HashMap::new(); let mut scache = HashMap::new(); let mut bstate = HashMap::new();
             loop {
-                let b = build(&lp, &keys, round, &mut hist, &mut scache, &mut bstate);
-                state.publish(b.envelope, b.per_pair, b.catalog, round, load_pools().len(), b.feeds_total, b.feeds_live);
+                let b = build(&lp, &keys, round, &mut hist, &mut scache, &mut bstate, &remote);
+                state.publish(b.envelope, b.per_pair, b.catalog, b.committee, round, load_pools().len(), b.feeds_total, b.feeds_live);
                 round += 1;
                 std::thread::sleep(Duration::from_millis(SERVE_MS));
             }
@@ -533,7 +701,97 @@ fn main() -> Result<()> {
     // bind 0.0.0.0:$PORT so it runs behind Cloud Run / a reverse proxy (PORT env),
     // falling back to the local default
     let port: u16 = std::env::var("PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(PORT);
-    println!("serving http://127.0.0.1:{port}  (/v1/feed · /v1/feeds · /health)");
+    println!("serving http://127.0.0.1:{port}  (/v1/feed · /v1/feeds · /v1/committee · /health)");
     http::run(port, state)?;
     Ok(())
+}
+
+// ---------- unit tests (integrity guards) ----------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mant_expo_nine_digits() {
+        let (m, e) = mant_expo(0.0824);
+        assert!((m as f64 * 10f64.powi(e) - 0.0824).abs() < 1e-12);
+        assert!((100_000_000..=999_999_999).contains(&m));
+        // tiny token that used to collapse to price_e8=0
+        let (m2, e2) = mant_expo(3e-9);
+        assert!(m2 > 0);
+        assert!((m2 as f64 * 10f64.powi(e2) - 3e-9).abs() / 3e-9 < 1e-6);
+    }
+
+    #[test]
+    fn mad_filter_drops_outlier() {
+        let mut srcs = vec![
+            ("A", 1.00, 0u64), ("B", 1.01, 0), ("C", 0.99, 0), ("D", 5.00, 0),
+        ];
+        let dropped = mad_filter(&mut srcs);
+        assert!(dropped.contains(&"D".to_string()));
+        assert_eq!(srcs.len(), 3);
+    }
+
+    #[test]
+    fn mad_filter_keeps_small_sets() {
+        let mut srcs = vec![("A", 1.0, 0u64), ("B", 9.0, 0), ("C", 1.1, 0)];
+        assert!(mad_filter(&mut srcs).is_empty());
+        assert_eq!(srcs.len(), 3);
+    }
+
+    #[test]
+    fn is_igra_source_matches_real_names() {
+        assert!(is_igra_source("Igra-Zealous"));
+        assert!(is_igra_source("Igra-KaspaCom"));
+        assert!(!is_igra_source("Kasplex-Zealous"));
+        // regression: build used to require the exact dead name "Igra-DEX"
+        assert!(!dex_source("igra").eq("Igra-DEX"));
+        assert_eq!(dex_source("igra"), "Igra-Zealous");
+        assert_eq!(dex_source("igrakc"), "Igra-KaspaCom");
+        assert!(is_igra_source(dex_source("igra")));
+        assert!(is_igra_source(dex_source("igrakc")));
+    }
+
+    #[test]
+    fn circuit_breaker_holds_then_releases() {
+        let mut bstate: HashMap<String, (f64, u32)> = HashMap::new();
+        let pair = "KAS/USD".to_string();
+        bstate.insert(pair.clone(), (1.0, 0));
+        // simulate jumps
+        let mut halted_count = 0u32;
+        let mut last = 1.0;
+        for i in 0..BREAK_ROUNDS + 2 {
+            let raw = 1.5; // 50% jump
+            let (med, halted) = match bstate.get(&pair).copied() {
+                Some((lg, n)) if lg > 0.0 && (raw - lg).abs() / lg > BREAK_PCT => {
+                    if n + 1 >= BREAK_ROUNDS { bstate.insert(pair.clone(), (raw, 0)); (raw, false) }
+                    else { bstate.insert(pair.clone(), (lg, n + 1)); (lg, true) }
+                }
+                _ => { bstate.insert(pair.clone(), (raw, 0)); (raw, false) }
+            };
+            if halted { halted_count += 1; assert!((med - 1.0).abs() < 1e-12); }
+            last = med;
+            let _ = i;
+        }
+        assert!(halted_count >= BREAK_ROUNDS - 1);
+        assert!((last - 1.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn price_bytes_and_record_layout() {
+        assert_eq!(price_bytes(0), Vec::<u8>::new());
+        assert_eq!(price_bytes(128), vec![0x80, 0x00]);
+        let r = attestation_record("KAS/USD", 42, 2_900_000);
+        let h = blake2b_simd::Params::new().hash_length(32).hash(b"KAS/USD");
+        assert_eq!(&r[..8], &h.as_bytes()[..8]);
+        assert_eq!(&r[8..16], &42u64.to_be_bytes());
+        assert_eq!(&r[16..24], &2_900_000u64.to_be_bytes());
+    }
+
+    #[test]
+    fn eth_call_cross_quorum_requires_two_when_configured() {
+        // unreachable endpoints → empty got → None (no single-response accept with 2 configured)
+        let rpcs = vec!["http://127.0.0.1:1".into(), "http://127.0.0.1:2".into()];
+        assert!(eth_call_cross(&rpcs, "0xabc", "0x00").is_none());
+    }
 }

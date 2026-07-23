@@ -40,17 +40,31 @@ let price = f.checked_value_fresh(std::time::Duration::from_secs(30))?; // verif
 
 A Kaspa covenant can refuse to release a coin unless a threshold of oracle
 signatures verifies **and** the price clears your condition — enforced by L1
-script at spend time, no trust in this server. Start with the walkthrough
-[**/guide.html**](../web/guide.html) (real testnet-10 txids, ~15 minutes; note
-its demo-committee caveat), then build with the SDK's `covenant` module
-(`price_gate_redeem_dir`, `range_settle_redeem`, witness/P2SH helpers — see
-[`sdk/README.md`](../sdk/README.md)).
+script at spend time. Production path: fetch a feed, pin via `/v1/committee`,
+`verify_covenant()` for hosted `blake2b(price_bytes)` sigs, then build a
+price-gate with the SDK's `covenant` module. Offline walkthrough:
+[**/guide.html**](../web/guide.html) (local demo committee OK for learning).
+
+Standing on-chain updates (TN10, deviation + heartbeat + merkle root):
+
+```sh
+KASPULSE_DRY_RUN=1 cargo run --bin standing --features onchain -- https://pulse.kascov.io
+```
 
 ```rust
 use kaspulse_sdk::covenant::{price_gate_redeem_dir, Gate};
 let redeem = price_gate_redeem_dir(&committee, strike_e8, Gate::AtOrAbove);
 ```
 
+## 2b. First integration target — Kaspa Finance
+
+Kaspa Finance (V3 DEX + planned lending) is the natural first consumer:
+lending *needs* an oracle, and kaspulse already prices competitor venues
+(Zealous / KaspaCom) for KRC-20s. Offer: free KAS/USD + KRC-20 feeds,
+`checked_value_fresh` off-chain today, TN10 covenant gates for prototypes,
+standing publisher for on-chain consumers. Outreach checklist: share this
+doc + live board at https://pulse.kascov.io/#/feeds + the guide; ask which
+pairs + freshness SLA they need.
 ## 3. Audit us
 
 The message format, hashing and signature scheme are fully specified in

@@ -21,6 +21,8 @@ const MAX_CONNS: usize = 256; // global cap — over it, immediate 503 + close
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const BUILD_FRESH_MS: u64 = 5_000; // /health flips to 503 when the last build is older
+/// Per-IP OG card rate limit (abuse guard for expensive PNG renders).
+const OG_RATE_PER_MIN: u32 = 30;
 
 fn now_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 }
 
@@ -30,6 +32,7 @@ pub struct PubState {
     pub envelope: Mutex<Arc<str>>,                  // full /v1/feed JSON
     pub per_pair: Mutex<HashMap<String, Arc<str>>>, // "KAS-USD" -> FeedObj JSON
     pub catalog: Mutex<Arc<str>>,                   // light /v1/feeds JSON
+    pub committee: Mutex<Arc<str>>,                 // /v1/committee pin artifact
     pub pairs: Mutex<Vec<String>>,                  // dash-form keys, for /sitemap.xml
     pub started: Instant,
     pub last_build_ms: AtomicU64, // epoch ms of the last publish
@@ -37,6 +40,9 @@ pub struct PubState {
     pub pools: AtomicUsize,
     pub feeds_total: AtomicUsize,
     pub feeds_live: AtomicUsize,
+    /// simple request counters for /health metrics
+    pub hits: AtomicU64,
+    pub og_hits: AtomicU64,
 }
 
 impl PubState {
@@ -45,6 +51,7 @@ impl PubState {
             envelope: Mutex::new(Arc::from(r#"{"feeds":[]}"#)),
             per_pair: Mutex::new(HashMap::new()),
             catalog: Mutex::new(Arc::from(r#"{"round":0,"timestamp":0,"count":0,"feeds":[]}"#)),
+            committee: Mutex::new(Arc::from(r#"{"threshold":3,"num_nodes":5,"signers":[]}"#)),
             pairs: Mutex::new(Vec::new()),
             started: Instant::now(),
             last_build_ms: AtomicU64::new(0),
@@ -52,10 +59,12 @@ impl PubState {
             pools: AtomicUsize::new(0),
             feeds_total: AtomicUsize::new(0),
             feeds_live: AtomicUsize::new(0),
+            hits: AtomicU64::new(0),
+            og_hits: AtomicU64::new(0),
         }
     }
     /// One call per build round — swaps in the new pre-serialized snapshot.
-    pub fn publish(&self, envelope: String, per_pair: Vec<(String, String)>, catalog: String,
+    pub fn publish(&self, envelope: String, per_pair: Vec<(String, String)>, catalog: String, committee: String,
                    round: u64, pools: usize, feeds_total: usize, feeds_live: usize) {
         *self.envelope.lock().unwrap() = Arc::from(envelope.as_str());
         {
@@ -66,6 +75,7 @@ impl PubState {
             *self.pairs.lock().unwrap() = keys;
         }
         *self.catalog.lock().unwrap() = Arc::from(catalog.as_str());
+        *self.committee.lock().unwrap() = Arc::from(committee.as_str());
         self.round.store(round, Ordering::Relaxed);
         self.pools.store(pools, Ordering::Relaxed);
         self.feeds_total.store(feeds_total, Ordering::Relaxed);
@@ -170,7 +180,9 @@ fn send_json(s: &mut TcpStream, status: &str, head: bool, body: &str) {
 fn handle(mut s: TcpStream, st: &PubState) {
     let _ = s.set_read_timeout(Some(READ_TIMEOUT));
     let _ = s.set_write_timeout(Some(WRITE_TIMEOUT));
+    let peer = s.peer_addr().ok().map(|a| a.ip().to_string()).unwrap_or_default();
     let Some((method, path)) = request_line(&mut s) else { return };
+    st.hits.fetch_add(1, Ordering::Relaxed);
     match method.as_str() {
         "OPTIONS" => { // preflight, any path
             let _ = s.write_all(b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, HEAD, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Max-Age: 3600\r\nX-Content-Type-Options: nosniff\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
@@ -190,13 +202,45 @@ fn handle(mut s: TcpStream, st: &PubState) {
             let body = st.catalog.lock().unwrap().clone();
             send_json(&mut s, "200 OK", head, &body);
         }
+        "/v1/committee" | "/api/committee" => {
+            let body = st.committee.lock().unwrap().clone();
+            // committee is pin-worthy — allow short cache so clients can hold it
+            send(&mut s, "200 OK", "application/json", "public, max-age=60", head, body.as_bytes());
+        }
+        "/metrics" => metrics(&mut s, st, head),
         "/sitemap.xml" => sitemap(&mut s, st, head),
         p if p.starts_with("/v1/feed/") => pair_feed(&mut s, st, head, &p[9..]),
         p if p.starts_with("/api/feed/") => pair_feed(&mut s, st, head, &p[10..]),
         p if p.starts_with("/share/") => share(&mut s, st, head, &p[7..]),
-        p if p.starts_with("/og/") && p.ends_with(".png") => og_card(&mut s, st, head, &p[4..p.len() - 4]),
+        p if p.starts_with("/og/") && p.ends_with(".png") => og_card(&mut s, st, head, &p[4..p.len() - 4], &peer),
         _ => static_file(&mut s, head, &path),
     }
+}
+
+fn metrics(s: &mut TcpStream, st: &PubState, head: bool) {
+    let body = format!(
+        r#"{{"round":{},"uptime_s":{},"feeds_total":{},"feeds_live":{},"pools":{},"hits":{},"og_hits":{},"build_age_ms":{}}}"#,
+        st.round.load(Ordering::Relaxed),
+        st.started.elapsed().as_secs(),
+        st.feeds_total.load(Ordering::Relaxed),
+        st.feeds_live.load(Ordering::Relaxed),
+        st.pools.load(Ordering::Relaxed),
+        st.hits.load(Ordering::Relaxed),
+        st.og_hits.load(Ordering::Relaxed),
+        now_ms().saturating_sub(st.last_build_ms.load(Ordering::Relaxed)),
+    );
+    send_json(s, "200 OK", head, &body);
+}
+
+fn og_rate_ok(peer: &str) -> bool {
+    static OG_HITS: OnceLock<Mutex<HashMap<String, (u64, u32)>>> = OnceLock::new();
+    let map = OG_HITS.get_or_init(|| Mutex::new(HashMap::new()));
+    let minute = now_ms() / 60_000;
+    let mut g = map.lock().unwrap();
+    let e = g.entry(peer.to_string()).or_insert((minute, 0));
+    if e.0 != minute { *e = (minute, 0); }
+    e.1 += 1;
+    e.1 <= OG_RATE_PER_MIN
 }
 
 fn health(s: &mut TcpStream, st: &PubState, head: bool) {
@@ -254,11 +298,15 @@ fn share(s: &mut TcpStream, st: &PubState, head: bool, seg: &str) {
     send(s, "200 OK", "text/html; charset=utf-8", "public, max-age=60", head, html.as_bytes());
 }
 
-fn og_card(s: &mut TcpStream, st: &PubState, head: bool, seg: &str) {
+fn og_card(s: &mut TcpStream, st: &PubState, head: bool, seg: &str, peer: &str) {
     let key = seg.to_uppercase();
     if !st.per_pair.lock().unwrap().contains_key(&key) {
         return send_json(s, "404 Not Found", head, r#"{"error":"no such feed"}"#);
     }
+    if !og_rate_ok(peer) {
+        return send_json(s, "429 Too Many Requests", head, r#"{"error":"og rate limit"}"#);
+    }
+    st.og_hits.fetch_add(1, Ordering::Relaxed);
     #[cfg(feature = "og")]
     {
         match crate::og::render_png(&key, st) {

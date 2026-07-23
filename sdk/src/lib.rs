@@ -44,6 +44,19 @@ impl std::error::Error for Error {}
 pub struct Source { pub name: String, pub price: f64, #[serde(default)] pub age_ms: u64 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct CovenantAttestation {
+    pub price_e8: u64,
+    /// hex of minimal LE script-number encoding of price_e8
+    #[serde(default)] pub price_bytes: String,
+    /// Schnorr sigs over blake2b(price_bytes), same order as Feed.signers
+    #[serde(default)] pub signatures: Vec<String>,
+    /// hex of the 24-byte bond attestation record
+    #[serde(default)] pub record: String,
+    /// Schnorr sigs over blake2b(record)
+    #[serde(default)] pub record_signatures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct Feed {
     pub pair: String,
     pub kind: String,
@@ -51,6 +64,7 @@ pub struct Feed {
     pub mant: u64,
     pub expo: i32,
     pub median: f64,
+    #[serde(default)] pub price_e8: u64,
     #[serde(default)] pub sources: Vec<Source>,
     #[serde(default)] pub num_sources: usize,
     #[serde(default)] pub freshest_ms: u64,
@@ -64,6 +78,19 @@ pub struct Feed {
     pub message: String,
     #[serde(default)] pub signed_ts: u64,
     #[serde(default)] pub signed_round: u64,
+    /// Hosted-committee signatures over the on-chain covenant encoding.
+    #[serde(default)] pub covenant: Option<CovenantAttestation>,
+}
+
+/// Pinned committee published at `/v1/committee`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Committee {
+    pub threshold: usize,
+    pub num_nodes: usize,
+    pub signers: Vec<String>,
+    #[serde(default)] pub message: String,
+    #[serde(default)] pub covenant: String,
+    #[serde(default)] pub updated_ts: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +196,40 @@ impl Feed {
         if valid >= self.threshold { Ok(()) } else { Err("threshold not met") }
     }
 
+    /// Like [`verify`], but also requires that at least `threshold` of the feed's
+    /// signers appear in the pinned committee (learned from `/v1/committee`, not
+    /// from the feed JSON alone).
+    pub fn verify_with_committee(&self, committee: &Committee) -> Result<(), &'static str> {
+        self.verify()?;
+        let pinned: std::collections::HashSet<&str> = committee.signers.iter().map(|s| s.as_str()).collect();
+        let n = self.signers.iter().filter(|s| pinned.contains(s.as_str())).count();
+        if n < self.threshold.min(committee.threshold) {
+            return Err("committee pin: fewer than threshold signers in pinned set");
+        }
+        Ok(())
+    }
+
+    /// Verify hosted covenant-domain signatures over `blake2b(price_bytes)`.
+    /// Returns the price_e8 when the threshold is met.
+    pub fn verify_covenant(&self) -> Result<u64, &'static str> {
+        let c = self.covenant.as_ref().ok_or("no covenant attestation")?;
+        if c.signatures.is_empty() || self.signers.is_empty() { return Err("empty covenant"); }
+        let pb = hex::decode(&c.price_bytes).map_err(|_| "bad price_bytes hex")?;
+        let h = blake2b_simd::Params::new().hash_length(32).hash(&pb);
+        let msg = secp256k1::Message::from_digest_slice(h.as_bytes()).map_err(|_| "hash")?;
+        let secp = secp256k1::Secp256k1::verification_only();
+        let mut valid = 0usize;
+        for (pk_hex, sig_hex) in self.signers.iter().zip(c.signatures.iter()) {
+            let ok = (|| {
+                let pk = secp256k1::XOnlyPublicKey::from_slice(&hex::decode(pk_hex).ok()?).ok()?;
+                let sig = secp256k1::schnorr::Signature::from_slice(&hex::decode(sig_hex).ok()?).ok()?;
+                Some(secp.verify_schnorr(&sig, &msg, &pk).is_ok())
+            })().unwrap_or(false);
+            if ok { valid += 1; }
+        }
+        if valid >= self.threshold { Ok(c.price_e8) } else { Err("covenant threshold not met") }
+    }
+
     /// Convenience: verified value, or an error explaining why not to use it.
     pub fn checked_value(&self) -> Result<f64, &'static str> { self.verify().map(|_| self.value()) }
 
@@ -216,6 +277,13 @@ pub fn fetch_all(base: &str) -> Result<Vec<Feed>, Error> {
 /// verify a pair's full feed (`fetch` + `checked_value*`) before acting on it.
 pub fn fetch_catalog(base: &str) -> Result<Catalog, Error> {
     let url = format!("{}/v1/feeds", base.trim_end_matches('/'));
+    get_json(&url, None)
+}
+
+/// Fetch the pinned committee artifact (`/v1/committee`). Pass it to
+/// [`Feed::verify_with_committee`] so keys are not learned only from the feed.
+pub fn fetch_committee(base: &str) -> Result<Committee, Error> {
+    let url = format!("{}/v1/committee", base.trim_end_matches('/'));
     get_json(&url, None)
 }
 
@@ -320,9 +388,8 @@ pub mod covenant {
     /// feed round; two same-slot different-price records signed by the same
     /// key let ANYONE seize the bond — verified purely by Kaspa L1 script.
     ///
-    /// NO reclaim-timelock branch is exposed: the honest node's bond-reclaim
-    /// path is marked unproven in `slash.rs`, and this SDK ships proven script
-    /// only.
+    /// Honest reclaim: after `timelock_daa` blocks with no slash, the node can
+    /// reclaim via [`bond_redeem_with_reclaim`] + [`reclaim_witness`].
     pub mod bond {
         use kaspa_txscript::{opcodes::codes::*, script_builder::ScriptBuilder};
 
@@ -361,12 +428,58 @@ pub mod covenant {
             b.drain()
         }
 
+        /// Bond redeem with an honest-reclaim branch: `IF <slash path> ELSE
+        /// <timelock> <node_pk> CHECKSIG ENDIF`. Spender picks the branch with
+        /// a leading `1` (slash) or `0` (reclaim) in the witness.
+        ///
+        /// `timelock_daa` is the relative DAA lock (OpCheckSequenceVerify).
+        pub fn bond_redeem_with_reclaim(node_pk: &[u8; 32], timelock_daa: u64) -> Vec<u8> {
+            let mut b = ScriptBuilder::new();
+            b.add_op(OpIf).unwrap();
+            // --- slash branch (identical to bond_redeem body) ---
+            b.add_op(OpSwap).unwrap().add_op(OpDup).unwrap().add_op(OpToAltStack).unwrap().add_op(OpBlake2b).unwrap()
+                .add_data(node_pk).unwrap().add_op(OpCheckSigFromStack).unwrap().add_op(OpVerify).unwrap();
+            b.add_op(OpSwap).unwrap().add_op(OpDup).unwrap().add_op(OpToAltStack).unwrap().add_op(OpBlake2b).unwrap()
+                .add_data(node_pk).unwrap().add_op(OpCheckSigFromStack).unwrap().add_op(OpVerify).unwrap();
+            b.add_op(OpFromAltStack).unwrap().add_op(OpFromAltStack).unwrap();
+            b.add_op(Op2Dup).unwrap()
+                .add_i64(0).unwrap().add_i64(16).unwrap().add_op(OpSubstr).unwrap()
+                .add_op(OpSwap).unwrap().add_i64(0).unwrap().add_i64(16).unwrap().add_op(OpSubstr).unwrap()
+                .add_op(OpEqualVerify).unwrap();
+            b.add_i64(16).unwrap().add_i64(24).unwrap().add_op(OpSubstr).unwrap()
+                .add_op(OpSwap).unwrap().add_i64(16).unwrap().add_i64(24).unwrap().add_op(OpSubstr).unwrap()
+                .add_op(OpEqual).unwrap().add_op(OpNot).unwrap();
+            b.add_op(OpElse).unwrap();
+            // --- reclaim branch: relative timelock + node schnorr ---
+            b.add_i64(timelock_daa as i64).unwrap().add_op(OpCheckSequenceVerify).unwrap().add_op(OpDrop).unwrap()
+                .add_data(node_pk).unwrap().add_op(OpCheckSig).unwrap();
+            b.add_op(OpEndIf).unwrap();
+            b.drain()
+        }
+
         /// The slash spend's signature script:
         /// `[rec1, sig1, rec2, sig2, redeem]` bottom→top.
         pub fn slash_witness(rec1: &[u8], sig1: &[u8], rec2: &[u8], sig2: &[u8], redeem: &[u8]) -> Vec<u8> {
             ScriptBuilder::new()
                 .add_data(rec1).unwrap().add_data(sig1).unwrap()
                 .add_data(rec2).unwrap().add_data(sig2).unwrap()
+                .add_data(redeem).unwrap().drain()
+        }
+
+        /// Slash witness for [`bond_redeem_with_reclaim`] — leading `1` selects IF.
+        pub fn slash_witness_if(rec1: &[u8], sig1: &[u8], rec2: &[u8], sig2: &[u8], redeem: &[u8]) -> Vec<u8> {
+            ScriptBuilder::new()
+                .add_data(rec1).unwrap().add_data(sig1).unwrap()
+                .add_data(rec2).unwrap().add_data(sig2).unwrap()
+                .add_i64(1).unwrap()
+                .add_data(redeem).unwrap().drain()
+        }
+
+        /// Honest reclaim witness: `[node_schnorr_sig, 0, redeem]` — ELSE branch.
+        pub fn reclaim_witness(node_sig: &[u8], redeem: &[u8]) -> Vec<u8> {
+            ScriptBuilder::new()
+                .add_data(node_sig).unwrap()
+                .add_i64(0).unwrap()
                 .add_data(redeem).unwrap().drain()
         }
 
@@ -398,9 +511,9 @@ mod tests {
         let signatures: Vec<String> = keys.iter().map(|k| hex::encode(secp.sign_schnorr_no_aux_rand(&msg, k).as_ref())).collect();
         Feed {
             pair: pair.into(), kind: "major".into(), price: 0.029, mant, expo, median: 0.029,
-            sources: vec![], num_sources: 3, freshest_ms: 100, thin: false, halted: false,
+            price_e8: 2_900_000, sources: vec![], num_sources: 3, freshest_ms: 100, thin: false, halted: false,
             degraded: false, peg_ok: None, threshold: 2, signers, signatures, message,
-            signed_ts: ts, signed_round: round,
+            signed_ts: ts, signed_round: round, covenant: None,
         }
     }
 
@@ -475,6 +588,48 @@ mod tests {
         let msg = secp256k1::Message::from_digest_slice(h.as_bytes()).unwrap();
         g.signatures = keys.iter().map(|k| hex::encode(secp.sign_schnorr_no_aux_rand(&msg, k).as_ref())).collect();
         assert!(g.checked_value_fresh(Duration::from_secs(30)).is_ok());
+    }
+
+    #[test]
+    fn verify_with_committee_pins_keys() {
+        let f = signed_feed();
+        let c = Committee {
+            threshold: 2, num_nodes: 3, signers: f.signers.clone(),
+            message: "kaspulse/v2".into(), covenant: "blake2b(price_bytes)".into(), updated_ts: 0,
+        };
+        assert!(f.verify_with_committee(&c).is_ok());
+        let bad = Committee {
+            threshold: 2, num_nodes: 3, signers: vec!["00".repeat(32)],
+            message: "kaspulse/v2".into(), covenant: String::new(), updated_ts: 0,
+        };
+        assert!(f.verify_with_committee(&bad).is_err());
+    }
+
+    #[test]
+    fn verify_covenant_threshold() {
+        let secp = secp256k1::Secp256k1::new();
+        let keys: Vec<secp256k1::Keypair> = (1u8..=3)
+            .map(|i| secp256k1::Keypair::from_secret_key(&secp, &secp256k1::SecretKey::from_slice(&[i; 32]).unwrap()))
+            .collect();
+        let mut f = signed_feed();
+        let pb = {
+            // minimal script num for 2_900_000
+            let mut abs = 2_900_000u64; let mut out = Vec::new();
+            while abs > 0 { out.push((abs & 0xff) as u8); abs >>= 8; }
+            if out.last().unwrap() & 0x80 != 0 { out.push(0); }
+            out
+        };
+        let h = blake2b_simd::Params::new().hash_length(32).hash(&pb);
+        let msg = secp256k1::Message::from_digest_slice(h.as_bytes()).unwrap();
+        let cov_sigs: Vec<String> = keys.iter().map(|k| hex::encode(secp.sign_schnorr_no_aux_rand(&msg, k).as_ref())).collect();
+        f.covenant = Some(CovenantAttestation {
+            price_e8: 2_900_000,
+            price_bytes: hex::encode(&pb),
+            signatures: cov_sigs,
+            record: String::new(),
+            record_signatures: vec![],
+        });
+        assert_eq!(f.verify_covenant().unwrap(), 2_900_000);
     }
 
     #[cfg(feature = "covenant")]
@@ -575,12 +730,20 @@ mod tests {
         }
 
         #[test]
-        fn p2sh_address_is_deterministic() {
-            let redeem = covenant::price_gate_redeem(&committee(), 2_000_000);
-            let a1 = covenant::p2sh_address(&redeem, covenant::Prefix::Testnet).unwrap();
-            let a2 = covenant::p2sh_address(&redeem, covenant::Prefix::Testnet).unwrap();
-            assert_eq!(a1, a2);
-            assert!(a1.to_string().starts_with("kaspatest:"));
+        fn bond_reclaim_script_has_if_else() {
+            let pk = committee()[0];
+            let slash_only = bond::bond_redeem(&pk);
+            let with_reclaim = bond::bond_redeem_with_reclaim(&pk, 86_400);
+            assert!(with_reclaim.len() > slash_only.len());
+            // OpIf = 0x63, OpElse = 0x67, OpEndIf = 0x68
+            assert!(with_reclaim.contains(&0x63));
+            assert!(with_reclaim.contains(&0x67));
+            assert!(with_reclaim.contains(&0x68));
+            let redeem = with_reclaim.clone();
+            let w = bond::reclaim_witness(&[0u8; 64], &redeem);
+            assert!(!w.is_empty());
+            let sw = bond::slash_witness_if(&[0u8; 24], &[0u8; 64], &[0u8; 24], &[0u8; 64], &redeem);
+            assert!(sw.len() > w.len());
         }
     }
 }

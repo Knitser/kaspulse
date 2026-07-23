@@ -8,10 +8,13 @@ and **gate a Kaspa covenant on-chain** (L1 enforces the oracle condition).
 ```rust
 use std::time::Duration;
 
-// set your BASE: the oracle's origin, e.g. "https://kaspulse-<hash>.europe-west4.run.app"
-let base = "http://localhost:8080";
+// public default: https://pulse.kascov.io — override for local dev
+let base = "https://pulse.kascov.io";
 
 let feed = kaspulse_sdk::fetch(base, "KAS/USD")?;      // /v1/feed/KAS-USD
+let committee = kaspulse_sdk::fetch_committee(base)?;  // /v1/committee pin
+feed.verify_with_committee(&committee)?;
+let _pe8 = feed.verify_covenant()?;                    // hosted blake2b(price_bytes) sigs
 match feed.checked_value_fresh(Duration::from_secs(30)) {
     Ok(price) => use_it(price),   // sigs verified + message fields bound + <30s old
     Err(why)  => reject(why),     // "halted" / "depegged" / "threshold not met" /
@@ -23,7 +26,9 @@ match feed.checked_value_fresh(Duration::from_secs(30)) {
 `PAIR|mant|expo|ts` fields to the JSON fields (so a lying server can't serve a
 price the signatures don't cover), honors the safety flags (`halted`, `peg_ok`),
 and requires the *signed* timestamp to be fresh. The price is `mant × 10^expo` —
-exact at any magnitude, from BTC to a $3e-9 meme token.
+exact at any magnitude, from BTC to a $3e-9 meme token. Pin keys with
+`fetch_committee` + `verify_with_committee`. On-chain consumers should also
+call `verify_covenant()` for the hosted `blake2b(price_bytes)` domain.
 
 Unknown pair? `fetch` returns `Error::NoSuchFeed` (the oracle answers a real
 HTTP 404). For dashboards, `fetch_catalog(base)` polls the light `/v1/feeds`

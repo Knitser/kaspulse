@@ -212,9 +212,8 @@ class NoSuchFeed(Exception):
         self.pair = pair
 
 
-# TODO(deploy): point this at the public *.run.app origin once the hosted
-# oracle is deployed — until then the honest default is a locally-run oracle.
-DEFAULT_BASE = 'http://localhost:8080'
+# Public hosted oracle. Override for local: Kaspulse('http://localhost:8080')
+DEFAULT_BASE = 'https://pulse.kascov.io'
 
 
 class Kaspulse:
@@ -231,6 +230,10 @@ class Kaspulse:
         This is the endpoint dashboards should poll."""
         return self._get('/v1/feeds')
 
+    def committee(self):
+        """Pinned committee artifact from /v1/committee."""
+        return self._get('/v1/committee')
+
     def feed(self, pair):
         """One full FeedObj (price, sources, signatures, history). pair like
         'KAS/USD' or 'KAS-USD', case-insensitive. Unknown pair → NoSuchFeed."""
@@ -244,6 +247,20 @@ class Kaspulse:
     def verify_feed(self, feed):
         """See module-level verify_feed()."""
         return verify_feed(feed)
+
+    def verify_with_committee(self, feed, committee):
+        """Like verify_feed, but require ≥threshold signers in the pinned set."""
+        r = verify_feed(feed)
+        if not r.get('ok'):
+            return r
+        pinned = set(committee.get('signers') or [])
+        n = sum(1 for s in (feed.get('signers') or []) if s in pinned)
+        need = min(int(feed.get('threshold') or 0), int(committee.get('threshold') or 0))
+        if n < need:
+            r = dict(r)
+            r['ok'] = False
+            r['error'] = 'committee pin: fewer than threshold signers in pinned set'
+        return r
 
     def checked_value(self, feed, max_age_s=30):
         """See module-level checked_value()."""

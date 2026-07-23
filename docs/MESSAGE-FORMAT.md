@@ -155,18 +155,38 @@ unchanged, heartbeat not yet due). Consumers enforce staleness against
 
 ## 8. On-chain encodings (bond record, price_bytes)
 
-Two fixed binary encodings are used by the covenant tooling. **Honesty note,
-load-bearing:** the hosted committee signs the §1 *message string* — that is
-what browsers, the clients and the SDK verify. The on-chain covenant flow in
-`/guide.html` verifies signatures over `blake2b(price_bytes)` produced by a
-**locally-generated demo committee** (the guide says so too). Publishing
-hosted-committee signatures over `blake2b(price_bytes)` is on the roadmap, not
-shipped. See "Status, honestly" in the [README](../README.md#status-honestly).
+Two fixed binary encodings are used by the covenant tooling. The hosted
+committee dual-signs:
+
+1. the §1 *message string* (off-chain clients / SDK `Feed::verify`)
+2. `blake2b(price_bytes)` and the 24-byte attestation record (on-chain
+   covenants / SDK `Feed::verify_covenant`)
+
+Each feed JSON includes a `covenant` object:
+
+```json
+"covenant": {
+  "price_e8": 8240000,
+  "price_bytes": "80bb7d",
+  "signatures": ["…", "…", "…", "…", "…"],
+  "record": "b84ad8389aa2ebb0…",
+  "record_signatures": ["…", "…", "…", "…", "…"]
+}
+```
+
+`signatures` are BIP340 over `blake2b-256(price_bytes)`; `record_signatures`
+are BIP340 over `blake2b-256(record)`. Same `signers[]` order as the v2
+message signatures. Pin the committee via `GET /v1/committee` and
+`Feed::verify_with_committee` so keys are not learned only from the feed.
+
+The `/guide.html` demo path can still use a local 3-key committee for a
+fully offline walkthrough; production consumers should use the hosted
+`covenant.signatures`.
 
 ### 8.1 The 24-byte attestation record (equivocation bond)
 
 For the slashing bond, a node signs fixed-width records (from
-`src/slash.rs`):
+`src/slash.rs` / the oracle build loop):
 
 ```
 record (24 bytes) = blake2b-256(PAIR_ascii)[0..8]   # 8-byte pair id
@@ -189,7 +209,7 @@ record   = b84ad8389aa2ebb0 0000000000001092 00000000311d3e00
 
 ### 8.2 price_bytes — minimal script-number encoding
 
-The demo covenant's price is `price_e8` (i64) pushed as a **minimal
+The covenant price is `price_e8` (i64) pushed as a **minimal
 little-endian script number** (from `sdk/src/lib.rs`, `price_bytes()`):
 
 ```
@@ -201,7 +221,8 @@ otherwise    → little-endian bytes of |price_e8|, minimal length;
 
 Examples: `8240000` (= $0.0824 e8) → `80bb7d`; `128` → `8000`; `127` → `7f`.
 Non-minimal encodings break the on-chain numeric comparison — encode exactly
-this way. The demo nodes sign `BIP340(m = blake2b-256(price_bytes))`.
+this way. The demo nodes sign `BIP340(m = blake2b-256(price_bytes))`. The hosted
+oracle publishes the same domain under `feed.covenant.signatures`.
 
 ## 9. Test vectors
 

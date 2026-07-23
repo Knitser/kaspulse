@@ -334,9 +334,8 @@ export class NoSuchFeedError extends Error {
   }
 }
 
-// TODO(deploy): point this at the public *.run.app origin once the hosted
-// oracle is deployed — until then the honest default is a locally-run oracle.
-const DEFAULT_BASE = 'http://localhost:8080';
+// Public hosted oracle. Override for local: new Kaspulse('http://localhost:8080')
+const DEFAULT_BASE = 'https://pulse.kascov.io';
 
 export class Kaspulse {
   constructor(base = DEFAULT_BASE) { this.base = String(base).replace(/\/+$/, ''); }
@@ -350,6 +349,10 @@ export class Kaspulse {
   /** Light catalog: {round, timestamp, count, feeds:[{pair, price, halted, thin, ...}]}.
       This is the endpoint dashboards should poll. */
   feeds() { return this.#get('/v1/feeds'); }
+
+  /** Pinned committee artifact — pass to verifyWithCommittee so keys aren't
+      learned only from the feed JSON. */
+  committee() { return this.#get('/v1/committee'); }
 
   /** One full FeedObj (price, sources, signatures, history). pair like
       'KAS/USD' or 'KAS-USD', case-insensitive. Unknown pair → NoSuchFeedError. */
@@ -365,6 +368,18 @@ export class Kaspulse {
       blake2b-256(message) AND signed-field/JSON-field binding. Pure sync.
       Returns {ok, valid, threshold, bound, parsed, results:[{signer, ok}]}. */
   verifyFeed(feed) { return verifyFeedCore(feed); }
+
+  /** Like verifyFeed, but also requires ≥threshold of feed.signers to appear
+      in the pinned committee from /v1/committee. */
+  verifyWithCommittee(feed, committee) {
+    const r = verifyFeedCore(feed);
+    if (!r.ok) return r;
+    const pinned = new Set((committee && committee.signers) || []);
+    const n = (feed.signers || []).filter((s) => pinned.has(s)).length;
+    const need = Math.min(Number(feed.threshold) || 0, Number(committee.threshold) || 0);
+    if (n < need) return { ...r, ok: false, error: 'committee pin: fewer than threshold signers in pinned set' };
+    return r;
+  }
 
   /** The verified price (mant × 10^expo) — or throw with the reason it is
       unsafe: failed verification, halted, depegged, or older than maxAgeMs. */

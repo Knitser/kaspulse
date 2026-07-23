@@ -6,12 +6,11 @@ daemon — **independent operators, each running `signer` on their own machine,
 with their own key, fetching the market themselves.** This page is everything
 an operator needs.
 
-*As of July 2026 the operator set is not open enrollment: the hosted committee
-doesn't yet aggregate external `/attest` responses into the published feed.
-Running a signer today means proving out the operator role (and the three
-proven-separate signers came from exactly this bin); joining the live committee
-means coordinating with the maintainer. This page will say so when that
-changes.*
+*The oracle aggregates external `/attest` responses when `KASPULSE_OPERATORS`
+is set (comma-separated base URLs). Attestations that verify under the
+operator's pubkey and agree on mant/expo are merged into the published feed.
+Open enrollment still means coordinating with the maintainer so your pubkey
+is expected; running a signer today is the real operator path.*
 
 ## 1. Key + start
 
@@ -27,6 +26,13 @@ First run with no key file at `key_path` **generates one** and writes it there
 - the daemon prints your **x-only public key** at startup; that's what you
   hand to the committee and what your (future) bond commits to
 
+On the oracle host:
+
+```sh
+export KASPULSE_OPERATORS=http://op1.example:9099,http://op2.example:9099
+```
+
+Each URL may be a base or end in `/attest`. The oracle polls every 2 s.
 ## 2. What it does — independence is the point
 
 Every 2 s the signer **fetches its own market view** — Kraken, KuCoin,
@@ -124,6 +130,10 @@ cargo run --bin slash_live --features onchain   # deploys a real bond on TN10 an
 
 `slash_live` is also how a bond is posted: it builds the bond covenant for a
 node key and funds it (from `~/.kaspulse/tn10.key` — testnet only, today).
+
+**Honest reclaim:** the SDK exposes `bond_redeem_with_reclaim(node_pk, timelock_daa)`
+plus `reclaim_witness` — after the relative DAA timelock, the node can reclaim
+without a slash proof. Prefer that redeem when posting long-lived bonds.
 
 **Exactly what is slashable** — the four cases `slash` proves on the script
 engine (`src/slash.rs`):
