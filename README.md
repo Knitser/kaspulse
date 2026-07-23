@@ -62,9 +62,13 @@ instead of restating it:*
   price-gated spends and equivocation slashing ran on the real chain (proof
   table below). Standing feeds: `cargo run --bin standing --features onchain`
   (deviation + heartbeat). **Mainnet publishing is next.**
-- **The hosted committee's 5 keys currently sign in one process** by default.
-  Set `KASPULSE_OPERATORS` to poll independent `signer` `/attest` endpoints
-  ([docs/OPERATOR.md](docs/OPERATOR.md)); cryptography is real 3-of-5.
+- **The hosted committee's 5 keys sign in one process** — so today's 3-of-5 is
+  one operator's five keys, not five independent operators. The threshold
+  *cryptography* is real; the *distribution* is not yet. `KASPULSE_OPERATORS`
+  wires a `signer`-aggregation scaffold ([docs/OPERATOR.md](docs/OPERATOR.md)),
+  but remote votes do **not** yet count toward the published threshold — they'd
+  need to sign the canonical price artifact and there's no operator allowlist.
+  A known gap, stated plainly, not a claim of decentralization.
 - **Hosted dual attestation shipped.** Each feed carries `covenant.signatures`
   over `blake2b(price_bytes)` plus bond `record` sigs; pin keys via
   `/v1/committee` + `Feed::verify_with_committee`. The guide's local demo

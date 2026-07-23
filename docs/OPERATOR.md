@@ -6,11 +6,13 @@ daemon — **independent operators, each running `signer` on their own machine,
 with their own key, fetching the market themselves.** This page is everything
 an operator needs.
 
-*The oracle aggregates external `/attest` responses when `KASPULSE_OPERATORS`
-is set (comma-separated base URLs). Attestations that verify under the
-operator's pubkey and agree on mant/expo are merged into the published feed.
-Open enrollment still means coordinating with the maintainer so your pubkey
-is expected; running a signer today is the real operator path.*
+*Status, honestly: `KASPULSE_OPERATORS` wires a scaffold that polls external
+`/attest` endpoints, but remote attestations do **not** yet count toward the
+published 3-of-5 — they sign their own ts/round rather than the canonical
+price artifact the feed publishes, and there is no pubkey allowlist. So today
+the threshold is the maintainer's five local keys. Running a `signer`
+exercises the operator path; making its votes actually count (canonical-artifact
+signing + an allowlist) is the open work before this is real decentralization.*
 
 ## 1. Key + start
 
