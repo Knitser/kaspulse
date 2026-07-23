@@ -112,7 +112,7 @@ function renderLanding() {
   view.innerHTML = `
   <section class="hero">
     <div class="eyebrow">the covenant-ready price oracle · Kaspa L1</div>
-    <h1>Every price Kaspa needs,<br><span class="grad">signed &amp; sub-second.</span></h1>
+    <h1>Every price Kaspa needs,<br><span class="grad">signed &amp; verifiable.</span></h1>
     <p class="lede">Since Toccata, a Kaspa coin can refuse to move unless the price is right. The chain can&rsquo;t see prices — so kaspulse signs them where covenants can: 60+ live feeds, majors under a second, plus 55+ KRC-20 tokens nobody else carries. Median of independent venues, 3-of-5 threshold-signed, verifiable by anyone. Including you. Including a coin.</p>
     <div class="stat-row" id="hero-stats"><span>connecting…</span></div>
   </section>

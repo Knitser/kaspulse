@@ -253,13 +253,21 @@ class Kaspulse:
         r = verify_feed(feed)
         if not r.get('ok'):
             return r
-        pinned = set(committee.get('signers') or [])
+        # The pin is only meaningful with a real committee: reject an empty or
+        # zero-threshold pinned set (else need=0 passes with no overlap).
+        need = int(committee.get('threshold') or 0)
+        signers = committee.get('signers') or []
+        if need <= 0 or not signers:
+            r = dict(r); r['ok'] = False
+            r['error'] = 'committee pin: empty or zero-threshold committee'
+            return r
+        pinned = set(signers)
         n = sum(1 for s in (feed.get('signers') or []) if s in pinned)
-        need = min(int(feed.get('threshold') or 0), int(committee.get('threshold') or 0))
+        # require the COMMITTEE's threshold (not min with the feed's server-supplied one)
         if n < need:
             r = dict(r)
             r['ok'] = False
-            r['error'] = 'committee pin: fewer than threshold signers in pinned set'
+            r['error'] = 'committee pin: fewer than committee-threshold signers in pinned set'
         return r
 
     def checked_value(self, feed, max_age_s=30):

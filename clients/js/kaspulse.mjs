@@ -374,10 +374,17 @@ export class Kaspulse {
   verifyWithCommittee(feed, committee) {
     const r = verifyFeedCore(feed);
     if (!r.ok) return r;
-    const pinned = new Set((committee && committee.signers) || []);
+    // The pin is only meaningful with a real committee: reject an empty or
+    // zero-threshold pinned set (else need=0 passes with no overlap).
+    const need = Number(committee && committee.threshold) || 0;
+    const signers = (committee && committee.signers) || [];
+    if (need <= 0 || signers.length === 0) {
+      return { ...r, ok: false, error: 'committee pin: empty or zero-threshold committee' };
+    }
+    const pinned = new Set(signers);
     const n = (feed.signers || []).filter((s) => pinned.has(s)).length;
-    const need = Math.min(Number(feed.threshold) || 0, Number(committee.threshold) || 0);
-    if (n < need) return { ...r, ok: false, error: 'committee pin: fewer than threshold signers in pinned set' };
+    // require the COMMITTEE's threshold (not min with the feed's server-supplied one)
+    if (n < need) return { ...r, ok: false, error: 'committee pin: fewer than committee-threshold signers in pinned set' };
     return r;
   }
 

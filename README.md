@@ -4,8 +4,9 @@ An oracle brings off-chain data (like the KAS/USD price) **on-chain**, so smart
 contracts (Kaspa covenants) can use it. kaspulse is a price oracle built for
 Kaspa's post-Toccata L1: every price a median of independent venues — including
 the KRC-20 tokens read straight from Kasplex/Igra DEX pools that nobody else
-carries — threshold-signed by 5 nodes (3-of-5), served sub-second, and
-**verifiable by anyone**: in your browser, in one file of Python or JS, or by a
+carries — threshold-signed by 5 nodes (3-of-5), majors sub-second (KRC-20 are
+chain-bound, ~1-2s), and **verifiable by anyone**: in your browser, in one file
+of Python or JS, or by a
 Kaspa covenant on-chain at spend time. The one idea: **you should never have to
 trust the oracle.**
 

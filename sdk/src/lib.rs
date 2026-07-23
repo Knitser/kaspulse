@@ -148,6 +148,19 @@ fn parse_i32_strict(s: &str) -> Option<i32> {
     s.parse().ok()
 }
 
+/// Canonical minimal LE script-number encoding of a NON-NEGATIVE `price_e8`
+/// (MESSAGE-FORMAT §8.2). Ungated (no kaspa deps) so [`Feed::verify_covenant`]
+/// can bind the returned integer to the bytes the committee actually signed.
+/// Matches `covenant::price_bytes` for all `price_e8 >= 0`.
+fn price_bytes_e8(price_e8: u64) -> Vec<u8> {
+    if price_e8 == 0 { return vec![]; }
+    let mut abs = price_e8;
+    let mut out = Vec::new();
+    while abs > 0 { out.push((abs & 0xff) as u8); abs >>= 8; }
+    if out.last().unwrap() & 0x80 != 0 { out.push(0); }
+    out
+}
+
 impl Feed {
     /// The exact value a covenant / consumer should treat as the price.
     pub fn value(&self) -> f64 { self.mant as f64 * 10f64.powi(self.expo) }
@@ -173,6 +186,9 @@ impl Feed {
     /// Trust NOTHING else.
     pub fn verify(&self) -> Result<(), &'static str> {
         if self.message.is_empty() || self.signers.is_empty() { return Err("empty feed"); }
+        // A zero threshold makes `valid >= threshold` vacuously true — reject it
+        // so a lying server can't serve signers with no valid signatures.
+        if self.threshold == 0 { return Err("threshold zero — refusing an unsigned feed"); }
         // guard flags a careful consumer should honor
         if self.halted { return Err("feed halted (circuit breaker)"); }
         if self.peg_ok == Some(false) { return Err("chain depegged"); }
@@ -200,11 +216,18 @@ impl Feed {
     /// signers appear in the pinned committee (learned from `/v1/committee`, not
     /// from the feed JSON alone).
     pub fn verify_with_committee(&self, committee: &Committee) -> Result<(), &'static str> {
+        // The pin is only meaningful with a real committee: a zero-threshold or
+        // empty pinned set would let `need = 0` pass with no overlap at all.
+        if committee.threshold == 0 || committee.signers.is_empty() {
+            return Err("committee pin: empty or zero-threshold committee");
+        }
         self.verify()?;
         let pinned: std::collections::HashSet<&str> = committee.signers.iter().map(|s| s.as_str()).collect();
         let n = self.signers.iter().filter(|s| pinned.contains(s.as_str())).count();
-        if n < self.threshold.min(committee.threshold) {
-            return Err("committee pin: fewer than threshold signers in pinned set");
+        // require the COMMITTEE's threshold in the pinned set (not min of the two —
+        // the feed's own threshold is server-supplied and must not weaken the pin)
+        if n < committee.threshold {
+            return Err("committee pin: fewer than committee-threshold signers in pinned set");
         }
         Ok(())
     }
@@ -212,9 +235,21 @@ impl Feed {
     /// Verify hosted covenant-domain signatures over `blake2b(price_bytes)`.
     /// Returns the price_e8 when the threshold is met.
     pub fn verify_covenant(&self) -> Result<u64, &'static str> {
+        // The feed's own v2 signatures + field binding must hold first.
+        self.verify()?;
         let c = self.covenant.as_ref().ok_or("no covenant attestation")?;
         if c.signatures.is_empty() || self.signers.is_empty() { return Err("empty covenant"); }
         let pb = hex::decode(&c.price_bytes).map_err(|_| "bad price_bytes hex")?;
+        // FIELD BINDING (the whole point): the signatures only cover `price_bytes`.
+        // Bind the returned integer to those signed bytes, and to the feed's own
+        // price_e8 — otherwise a lying server serves real sigs over the true
+        // price's bytes but returns a `price_e8` the committee never signed.
+        if price_bytes_e8(c.price_e8) != pb {
+            return Err("covenant: price_e8 is not the integer the signed price_bytes encodes");
+        }
+        if c.price_e8 != self.price_e8 {
+            return Err("covenant: price_e8 disagrees with the feed's price_e8");
+        }
         let h = blake2b_simd::Params::new().hash_length(32).hash(&pb);
         let msg = secp256k1::Message::from_digest_slice(h.as_bytes()).map_err(|_| "hash")?;
         let secp = secp256k1::Secp256k1::verification_only();
@@ -630,6 +665,32 @@ mod tests {
             record_signatures: vec![],
         });
         assert_eq!(f.verify_covenant().unwrap(), 2_900_000);
+    }
+
+    #[test]
+    fn verify_covenant_rejects_forged_price_e8() {
+        // The committee genuinely signs price_bytes for the TRUE price 2_900_000.
+        let secp = secp256k1::Secp256k1::new();
+        let keys: Vec<secp256k1::Keypair> = (1u8..=3)
+            .map(|i| secp256k1::Keypair::from_secret_key(&secp, &secp256k1::SecretKey::from_slice(&[i; 32]).unwrap()))
+            .collect();
+        let pb = price_bytes_e8(2_900_000);
+        let h = blake2b_simd::Params::new().hash_length(32).hash(&pb);
+        let msg = secp256k1::Message::from_digest_slice(h.as_bytes()).unwrap();
+        let cov_sigs: Vec<String> = keys.iter().map(|k| hex::encode(secp.sign_schnorr_no_aux_rand(&msg, k).as_ref())).collect();
+        // A lying server forges price_e8 on BOTH the feed and the covenant, but
+        // can't re-sign — price_bytes still encodes the true 2_900_000.
+        let mut f = signed_feed();
+        f.price_e8 = 9_999_999;
+        f.covenant = Some(CovenantAttestation {
+            price_e8: 9_999_999,
+            price_bytes: hex::encode(&pb), // authentic sigs cover THIS, not 9_999_999
+            signatures: cov_sigs,
+            record: String::new(),
+            record_signatures: vec![],
+        });
+        // Before the fix this returned 9_999_999 (a value no key signed); now it must reject.
+        assert!(f.verify_covenant().is_err(), "forged price_e8 must not pass covenant verification");
     }
 
     #[cfg(feature = "covenant")]
