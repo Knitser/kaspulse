@@ -80,6 +80,17 @@ button{font:inherit}
 .badge.outlier{color:var(--faint);border:1px solid var(--line)}
 .badge.fresh{color:var(--green);border:1px solid rgba(111,217,164,.35);background:rgba(111,217,164,.07)}
 .badge.proof{color:var(--green);border:1px solid rgba(111,217,164,.35);background:rgba(111,217,164,.07)}
+.badge.divergent{color:var(--violet);border:1px solid rgba(199,146,234,.5);background:rgba(199,146,234,.10)}
+.badge.pool{border:0;background:none;padding:0}   /* wraps its own .pool-age chip */
+
+/* pool TOUCH age — replaces the freshness dot on KRC-20 cards, where a green
+   "live" dot would describe our RPC read, not the price. Green only under 1h. */
+.pool-age{font-family:var(--mono);white-space:nowrap;border:1px solid var(--line);border-radius:20px;padding:1px 7px;color:var(--faint)}
+.pool-age.fresh{color:var(--green);border-color:rgba(111,217,164,.35)}
+.pool-age.warm{color:var(--gold);border-color:rgba(255,212,121,.35)}
+.pool-age.stale{color:var(--red);border-color:rgba(255,122,138,.4)}
+.move10{font-family:var(--mono);white-space:nowrap;color:var(--teal)}
+.move10.low{color:var(--gold)}
 
 /* ---- board page controls ---- */
 .board-controls{display:flex;gap:12px;align-items:center;margin:0 0 18px;flex-wrap:wrap}
@@ -122,7 +133,7 @@ button{font:inherit}
 
 /* ---- comparison table ---- */
 .cmp-wrap{overflow-x:auto}
-.cmp{width:100%;border-collapse:collapse;font-size:13.5px;min-width:560px}
+.cmp{width:100%;border-collapse:collapse;font-size:13.5px;min-width:760px}
 .cmp th,.cmp td{padding:11px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
 .cmp th{font-family:var(--mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);font-weight:600}
 .cmp td:first-child{color:var(--faint);font-family:var(--mono);font-size:12px;white-space:nowrap}
@@ -154,6 +165,7 @@ button{font:inherit}
 .detail-price.up{color:var(--green)}.detail-price.dn{color:var(--red)}
 .halted-banner{margin:10px 0;padding:13px 16px;border-radius:12px;background:rgba(255,122,138,.08);border:1px solid rgba(255,122,138,.45);color:var(--red);font-family:var(--mono);font-size:13.5px}
 .thin-note{margin:10px 0;font-size:13px;color:var(--gold)}
+.diverge-note{margin:10px 0;font-size:13px;color:var(--violet)}
 .stat-strip{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0 22px}
 .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 16px;text-align:center;flex:1;min-width:110px}
 .stat b{display:block;font-size:17px;font-weight:800;font-family:var(--mono);letter-spacing:-.02em}

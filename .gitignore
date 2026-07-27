@@ -3,3 +3,13 @@
 web/feed.json
 sdk/target
 __pycache__/
+# monotonic round-slot high-water marks (a RESERVATION: always ≥ the last round
+# signed), written next to the running binary. Safe to delete on a box with a
+# correct forward clock — the slot comes from wall clock and the file only
+# defends against a backwards step. The dangerous case is the opposite of the
+# obvious one: a VM snapshot restore rewinds this file AND the clock together,
+# so it silently stops defending anything. See DEPLOY.md §"working directory".
+round.hwm
+round.hwm.tmp
+signer-round.hwm
+signer-round.hwm.tmp

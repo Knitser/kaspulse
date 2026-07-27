@@ -9,6 +9,15 @@
 //!              <oraclePubkey> OpCheckSigFromStack
 //!     The chain itself checks: price >= strike AND the oracle signed it.
 //!
+//! HONEST: the "oracle" key here is a LOCAL DEMO key (`gate-node-0.key`), never
+//! `kaspulse-node-0.key`. This bin BROADCASTS a signature over
+//! blake2b(price_bytes) in a public TN10 witness, and that preimage is a bare
+//! integer — no pair, no expo, no round, no ts — so a real committee signature
+//! over it would permanently unlock any CSFS price gate on any pair with a lower
+//! strike, scraped straight off the chain. The domain was withdrawn from
+//! /v1/feed on 2026-07-27; the chain is the other path, so this bin was moved to
+//! a demo key on the same day. See src/consumer_live.rs and src/gate.rs.
+//!
 //! Run: cargo run --bin onchain --features onchain
 
 use anyhow::{bail, Context, Result};
@@ -65,11 +74,18 @@ fn blake32(b: &[u8]) -> [u8; 32] {
 }
 
 // ---------- node/oracle keys + kaspa key ----------
+/// DEMO oracle signer — `gate-node-0.key`, generated on first use. NOT
+/// `kaspulse-node-0.key`: see the withdrawal note in the file header.
 fn load_oracle_key() -> Keypair {
-    // node 0 is the demo's designated oracle signer for the consumer covenant.
-    let raw = std::fs::read_to_string("kaspulse-node-0.key").expect("run the oracle first to create node keys");
-    let sk = secp256k1::SecretKey::from_slice(&hex::decode(raw.trim()).unwrap()).unwrap();
-    Keypair::from_secret_key(SECP256K1, &sk)
+    let path = "gate-node-0.key";
+    if let Some(kp) = std::fs::read_to_string(path).ok()
+        .and_then(|raw| hex::decode(raw.trim()).ok())
+        .and_then(|b| secp256k1::SecretKey::from_slice(&b).ok())
+        .map(|sk| Keypair::from_secret_key(SECP256K1, &sk)) { return kp; }
+    let kp = Keypair::new(SECP256K1, &mut secp256k1::rand::thread_rng());
+    std::fs::write(path, hex::encode(kp.secret_key().secret_bytes())).expect("write demo key");
+    println!("wrote {path} (demo signer — the same file `gate keygen` writes)");
+    kp
 }
 fn load_funding_key() -> Result<Keypair> {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -96,7 +112,7 @@ async fn main() -> Result<()> {
     let oracle = load_oracle_key();
     let oracle_pk = oracle.public_key().x_only_public_key().0.serialize();
     println!("kaspulse onchain — {PAIR} = ${price:.6}  (price_e8={price_e8}, strike=$0.02)");
-    println!("oracle signer: {}", hex::encode(oracle_pk));
+    println!("oracle signer (LOCAL DEMO key, not the hosted committee): {}", hex::encode(oracle_pk));
 
     // the oracle signs blake2b(price_bytes) — CSFS message hash
     let price_bytes = script_num(price_e8);

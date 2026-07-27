@@ -18,11 +18,18 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_CONNS: usize = 256; // global cap — over it, immediate 503 + close
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
+// 3s, not 5: we now wait for the whole header block, and holding 256 threads
+// open on a half-sent request is a mild slowloris amplifier at MAX_CONNS.
+const READ_TIMEOUT: Duration = Duration::from_secs(3);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const BUILD_FRESH_MS: u64 = 5_000; // /health flips to 503 when the last build is older
 /// Per-IP OG card rate limit (abuse guard for expensive PNG renders).
-const OG_RATE_PER_MIN: u32 = 30;
+/// 120, not 30: the bucket is a real client IP now (see `request_head` +
+/// `behind_proxy`) instead of one shared 127.0.0.1 key for all of Caddy, and one
+/// NAT'd office or Discord unfurl fan-out legitimately blows past 30/min.
+const OG_RATE_PER_MIN: u32 = 120;
+/// Hard cap on distinct rate-limit keys held at once (see `og_rate_ok`).
+const OG_RATE_MAX_KEYS: usize = 10_000;
 
 fn now_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 }
 
@@ -148,22 +155,60 @@ pub fn run(port: u16, state: Arc<PubState>) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Read just the request line (method + path). Bodies are irrelevant here.
-fn request_line(s: &mut TcpStream) -> Option<(String, String)> {
-    let mut buf = Vec::with_capacity(1024);
+/// Read the request line AND the header block (bodies are still irrelevant).
+/// We need the headers because behind a reverse proxy every socket peer is
+/// 127.0.0.1 — without X-Forwarded-For the OG limiter buckets the entire
+/// internet as one client. Stops at the end of the header block or 8192
+/// bytes, whichever comes first; a read error/timeout mid-way is not fatal as
+/// long as we already have a request line (HTTP/1.0 clients that send no
+/// blank line still get served).
+fn request_head(s: &mut TcpStream) -> Option<(String, String, Option<String>)> {
+    let mut buf = Vec::with_capacity(2048);
     let mut tmp = [0u8; 1024];
     loop {
-        let n = s.read(&mut tmp).ok()?;
-        if n == 0 { break; }
+        let n = match s.read(&mut tmp) { Ok(0) | Err(_) => break, Ok(n) => n };
         buf.extend_from_slice(&tmp[..n]);
-        if buf.windows(2).any(|w| w == b"\r\n") || buf.len() > 8192 { break; }
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() > 8192 { break; }
     }
-    let text = String::from_utf8_lossy(&buf);
-    let line = text.lines().next()?;
+    parse_head(&String::from_utf8_lossy(&buf))
+}
+
+/// Split off from the socket read so it can be tested directly.
+fn parse_head(text: &str) -> Option<(String, String, Option<String>)> {
+    let mut lines = text.lines();
+    let line = lines.next()?;
     let mut it = line.split_whitespace();
     let method = it.next()?.to_string();
     let path = it.next()?.split('?').next().unwrap_or("/").to_string();
-    Some((method, path))
+    // LAST comma-separated XFF entry, not the first. pulse.kascov.io is
+    // directly internet-facing with no CDN, so Caddy APPENDS the true peer to
+    // whatever XFF the client sent — the first entry is fully attacker-
+    // controlled and would let anyone mint a fresh bucket per request.
+    let mut xff = None;
+    for l in lines {
+        if l.is_empty() { break } // end of the header block; body (if any) is not headers
+        let Some((k, v)) = l.split_once(':') else { continue };
+        if !k.trim().eq_ignore_ascii_case("x-forwarded-for") { continue }
+        // last header wins too (multiple XFF headers concatenate semantically)
+        xff = v.rsplit(',').next().map(str::trim).filter(|e| ip_like(e)).map(str::to_string);
+    }
+    Some((method, path, xff))
+}
+
+/// Cheap shape check on an XFF entry before it becomes a HashMap key —
+/// keeps a hostile header from stuffing 8KB of junk into the limiter map.
+fn ip_like(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 45
+        && s.bytes().all(|b| b.is_ascii_hexdigit() || matches!(b, b'.' | b':' | b'%'))
+}
+
+/// Only trust X-Forwarded-For when we're bound to loopback — then the only
+/// thing that can open a socket to us is the local reverse proxy. A 0.0.0.0
+/// build (dev, or a direct deploy) must keep keying on the socket peer, or
+/// every client can simply forge its own rate-limit bucket.
+fn behind_proxy() -> bool {
+    static P: OnceLock<bool> = OnceLock::new();
+    *P.get_or_init(|| std::env::var("KASPULSE_BIND").map(|b| b.starts_with("127.")).unwrap_or(false))
 }
 
 fn send(s: &mut TcpStream, status: &str, ctype: &str, cache: &str, head_only: bool, body: &[u8]) {
@@ -180,8 +225,11 @@ fn send_json(s: &mut TcpStream, status: &str, head: bool, body: &str) {
 fn handle(mut s: TcpStream, st: &PubState) {
     let _ = s.set_read_timeout(Some(READ_TIMEOUT));
     let _ = s.set_write_timeout(Some(WRITE_TIMEOUT));
-    let peer = s.peer_addr().ok().map(|a| a.ip().to_string()).unwrap_or_default();
-    let Some((method, path)) = request_line(&mut s) else { return };
+    let Some((method, path, xff)) = request_head(&mut s) else { return };
+    let peer = match xff {
+        Some(ip) if behind_proxy() => ip,
+        _ => s.peer_addr().ok().map(|a| a.ip().to_string()).unwrap_or_default(),
+    };
     st.hits.fetch_add(1, Ordering::Relaxed);
     match method.as_str() {
         "OPTIONS" => { // preflight, any path
@@ -237,6 +285,11 @@ fn og_rate_ok(peer: &str) -> bool {
     let map = OG_HITS.get_or_init(|| Mutex::new(HashMap::new()));
     let minute = now_ms() / 60_000;
     let mut g = map.lock().unwrap();
+    // Entries are never removed on their own, so a wide scan (or a spoofed
+    // XFF before we knew better) grows the map forever — drop everything not
+    // in the current minute once it gets big. O(n) at most once per key past
+    // the cap, and stale entries are worthless anyway.
+    if g.len() > OG_RATE_MAX_KEYS { g.retain(|_, v| v.0 == minute); }
     let e = g.entry(peer.to_string()).or_insert((minute, 0));
     if e.0 != minute { *e = (minute, 0); }
     e.1 += 1;
@@ -310,7 +363,9 @@ fn og_card(s: &mut TcpStream, st: &PubState, head: bool, seg: &str, peer: &str) 
     #[cfg(feature = "og")]
     {
         match crate::og::render_png(&key, st) {
-            Some(png) => send(s, "200 OK", "image/png", "public, max-age=60", head, &png),
+            // 120s: unfurl bots and browsers should re-fetch a card at most
+            // twice a minute-ish when a launch post spreads it around.
+            Some(png) => send(s, "200 OK", "image/png", "public, max-age=120", head, &png),
             None => send_json(s, "404 Not Found", head,
                 r#"{"error":"og cards unavailable: fonts missing — run scripts/fetch-fonts.sh"}"#),
         }
@@ -369,4 +424,48 @@ fn static_file(s: &mut TcpStream, head: bool, path: &str) {
     };
     let cache = if html { "no-cache" } else { "public, max-age=300" };
     send(s, "200 OK", mime(rel), cache, head, &body);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_head;
+
+    fn xff(h: &str) -> Option<String> { parse_head(h).unwrap().2 }
+
+    #[test]
+    fn head_parses_and_takes_last_xff_entry() {
+        // Caddy appends the true peer, so the LAST entry is the only one the
+        // client could not choose. First-entry would be attacker-controlled.
+        let h = "GET /og/KAS-USD.png?p=1 HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 1.2.3.4, 5.6.7.8\r\n\r\n";
+        let (m, p, ip) = parse_head(h).unwrap();
+        assert_eq!((m.as_str(), p.as_str()), ("GET", "/og/KAS-USD.png"));
+        assert_eq!(ip.as_deref(), Some("5.6.7.8"));
+    }
+
+    #[test]
+    fn xff_header_name_is_case_insensitive_and_last_header_wins() {
+        assert_eq!(xff("GET / HTTP/1.1\r\nx-FORWARDED-for: 9.9.9.9\r\n\r\n").as_deref(), Some("9.9.9.9"));
+        assert_eq!(xff("GET / HTTP/1.1\r\nX-Forwarded-For: 1.1.1.1\r\nX-Forwarded-For: 2.2.2.2\r\n\r\n").as_deref(),
+                   Some("2.2.2.2"));
+    }
+
+    #[test]
+    fn junk_and_missing_xff_fall_back_to_the_socket_peer() {
+        assert_eq!(xff("GET / HTTP/1.1\r\nHost: x\r\n\r\n"), None);
+        assert_eq!(xff("GET / HTTP/1.1\r\nX-Forwarded-For: \r\n\r\n"), None);
+        // an unbounded junk key would be a memory-growth lever on the limiter
+        assert_eq!(xff(&format!("GET / HTTP/1.1\r\nX-Forwarded-For: {}\r\n\r\n", "A".repeat(4000))), None);
+        assert_eq!(xff("GET / HTTP/1.1\r\nX-Forwarded-For: not an ip\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn body_bytes_are_never_scanned_for_headers() {
+        assert_eq!(xff("POST / HTTP/1.1\r\nHost: x\r\n\r\nX-Forwarded-For: 6.6.6.6\r\n"), None);
+    }
+
+    #[test]
+    fn ipv6_survives_the_shape_check() {
+        assert_eq!(xff("GET / HTTP/1.1\r\nX-Forwarded-For: 1.2.3.4, 2001:db8::ff00:42:8329\r\n\r\n").as_deref(),
+                   Some("2001:db8::ff00:42:8329"));
+    }
 }

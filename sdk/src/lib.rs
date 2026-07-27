@@ -48,9 +48,11 @@ pub struct CovenantAttestation {
     pub price_e8: u64,
     /// hex of minimal LE script-number encoding of price_e8
     #[serde(default)] pub price_bytes: String,
-    /// Schnorr sigs over blake2b(price_bytes), same order as Feed.signers
+    /// WITHDRAWN — the server no longer emits this field, and the domain it
+    /// covered (blake2b(price_bytes)) is unbound. Kept in the struct so old
+    /// archived JSON still deserializes; see [`Feed::verify_covenant`].
     #[serde(default)] pub signatures: Vec<String>,
-    /// hex of the 24-byte bond attestation record
+    /// hex of the 32-byte bond attestation record (v2: pair ‖ round ‖ mant ‖ expo)
     #[serde(default)] pub record: String,
     /// Schnorr sigs over blake2b(record)
     #[serde(default)] pub record_signatures: Vec<String>,
@@ -149,9 +151,12 @@ fn parse_i32_strict(s: &str) -> Option<i32> {
 }
 
 /// Canonical minimal LE script-number encoding of a NON-NEGATIVE `price_e8`
-/// (MESSAGE-FORMAT §8.2). Ungated (no kaspa deps) so [`Feed::verify_covenant`]
-/// can bind the returned integer to the bytes the committee actually signed.
-/// Matches `covenant::price_bytes` for all `price_e8 >= 0`.
+/// (MESSAGE-FORMAT §8.2). Matches `covenant::price_bytes` for all `price_e8 >= 0`.
+///
+/// No longer used by [`Feed::verify_covenant`] (that domain is withdrawn); kept
+/// because it is the canonical encoder for the published `covenant.price_bytes`
+/// field and the tests assert against it.
+#[allow(dead_code)]
 fn price_bytes_e8(price_e8: u64) -> Vec<u8> {
     if price_e8 == 0 { return vec![]; }
     let mut abs = price_e8;
@@ -232,37 +237,35 @@ impl Feed {
         Ok(())
     }
 
-    /// Verify hosted covenant-domain signatures over `blake2b(price_bytes)`.
-    /// Returns the price_e8 when the threshold is met.
+    /// WITHDRAWN. Always returns `Err`.
+    ///
+    /// This used to verify committee signatures over `blake2b(price_bytes)` and
+    /// return the price_e8. That domain is **unbound**: the preimage is a bare
+    /// script-number integer with no pair, no exponent, no round and no
+    /// timestamp. Consequences, all live-verified:
+    ///
+    /// * BTC/USD's signatures unlock ANY `price_gate_redeem` covenant on ANY
+    ///   pair whose strike_e8 is lower — i.e. every realistic KAS/KRC-20 gate.
+    /// * feeds that quantize to `price_e8 = 0` (BONKEY, KANDA, KOMA) carried
+    ///   real signatures over `blake2b(empty)`, permanently satisfying every
+    ///   `AtOrBelow` gate.
+    /// * nothing binds a timestamp, so every attestation replays forever.
+    ///
+    /// The field binding this function performed was real, but it bound the
+    /// wrong thing: it proved the returned integer matched the signed bytes,
+    /// never that those bytes belonged to THIS pair at THIS round. The server no
+    /// longer emits `covenant.signatures`, so there is nothing left to verify.
+    ///
+    /// The function is retained (not deleted) so the API does not break and so
+    /// anyone holding an archived pre-withdrawal feed gets a loud, specific
+    /// error instead of a silent success. It will return `Ok` again only when
+    /// the bound `kaspulse/cov/v2` preimage ships and is re-proven on TN10 —
+    /// see the `TODO(cov/v2)` in the oracle's `price_bytes()`.
     pub fn verify_covenant(&self) -> Result<u64, &'static str> {
-        // The feed's own v2 signatures + field binding must hold first.
-        self.verify()?;
-        let c = self.covenant.as_ref().ok_or("no covenant attestation")?;
-        if c.signatures.is_empty() || self.signers.is_empty() { return Err("empty covenant"); }
-        let pb = hex::decode(&c.price_bytes).map_err(|_| "bad price_bytes hex")?;
-        // FIELD BINDING (the whole point): the signatures only cover `price_bytes`.
-        // Bind the returned integer to those signed bytes, and to the feed's own
-        // price_e8 — otherwise a lying server serves real sigs over the true
-        // price's bytes but returns a `price_e8` the committee never signed.
-        if price_bytes_e8(c.price_e8) != pb {
-            return Err("covenant: price_e8 is not the integer the signed price_bytes encodes");
-        }
-        if c.price_e8 != self.price_e8 {
-            return Err("covenant: price_e8 disagrees with the feed's price_e8");
-        }
-        let h = blake2b_simd::Params::new().hash_length(32).hash(&pb);
-        let msg = secp256k1::Message::from_digest_slice(h.as_bytes()).map_err(|_| "hash")?;
-        let secp = secp256k1::Secp256k1::verification_only();
-        let mut valid = 0usize;
-        for (pk_hex, sig_hex) in self.signers.iter().zip(c.signatures.iter()) {
-            let ok = (|| {
-                let pk = secp256k1::XOnlyPublicKey::from_slice(&hex::decode(pk_hex).ok()?).ok()?;
-                let sig = secp256k1::schnorr::Signature::from_slice(&hex::decode(sig_hex).ok()?).ok()?;
-                Some(secp.verify_schnorr(&sig, &msg, &pk).is_ok())
-            })().unwrap_or(false);
-            if ok { valid += 1; }
-        }
-        if valid >= self.threshold { Ok(c.price_e8) } else { Err("covenant threshold not met") }
+        Err("unbound covenant domain withdrawn — do not use: blake2b(price_bytes) \
+             binds no pair, expo, round or ts, so one feed's signatures unlock any \
+             lower-strike gate on any pair. Use verify()/verify_with_committee() \
+             and the v2 message instead.")
     }
 
     /// Convenience: verified value, or an error explaining why not to use it.
@@ -419,7 +422,7 @@ pub mod covenant {
 
     /// Equivocation-bond helpers, extracted from the `slash` / `slash_live`
     /// bins (slashing path proven on TN10). A node posts a bond behind
-    /// `bond_redeem(node_pk)` and signs a 24-byte [`attestation_record`] per
+    /// `bond_redeem(node_pk)` and signs a 32-byte [`attestation_record`] per
     /// feed round; two same-slot different-price records signed by the same
     /// key let ANYONE seize the bond — verified purely by Kaspa L1 script.
     ///
@@ -428,13 +431,26 @@ pub mod covenant {
     pub mod bond {
         use kaspa_txscript::{opcodes::codes::*, script_builder::ScriptBuilder};
 
-        /// 24 bytes: slot(blake2b(pair)[0..8] ‖ round_be[8..16]) ‖ price(mant_be[16..24]).
-        pub fn attestation_record(pair: &str, round: u64, mant: u64) -> [u8; 24] {
-            let h = blake2b_simd::Params::new().hash_length(32).hash(pair.as_bytes());
-            let mut r = [0u8; 24];
+        /// 32 bytes (v2): slot(pairId[0..8] ‖ round_be[8..16]) ‖
+        /// price(mant_be[16..24] ‖ expo_be[24..32]), where
+        /// `pairId = blake2b("kaspulse/bond/v2|{pair}")[0..8]`.
+        ///
+        /// v1 was 24 bytes and omitted `expo`, which made mant=293_800_000 at
+        /// expo=-10 and at expo=-9 byte-identical — a 10x price move was
+        /// provably UNSLASHABLE. expo now sits inside the compared price tail.
+        /// The pair-id is domain-separated (`kaspulse/bond/v2|`) so a v1 record
+        /// can never collide with a v2 one, even at the same round.
+        ///
+        /// Byte-identical to `attestation_record` in the oracle (src/main.rs) —
+        /// the two are duplicated on purpose (the oracle must not pull the
+        /// kaspa script stack) and must be changed together.
+        pub fn attestation_record(pair: &str, round: u64, mant: u64, expo: i32) -> [u8; 32] {
+            let h = blake2b_simd::Params::new().hash_length(32).hash(format!("kaspulse/bond/v2|{pair}").as_bytes());
+            let mut r = [0u8; 32];
             r[..8].copy_from_slice(&h.as_bytes()[..8]);
             r[8..16].copy_from_slice(&round.to_be_bytes());
             r[16..24].copy_from_slice(&mant.to_be_bytes());
+            r[24..32].copy_from_slice(&(expo as i64).to_be_bytes());
             r
         }
 
@@ -456,9 +472,9 @@ pub mod covenant {
                 .add_i64(0).unwrap().add_i64(16).unwrap().add_op(OpSubstr).unwrap()          // slot2
                 .add_op(OpSwap).unwrap().add_i64(0).unwrap().add_i64(16).unwrap().add_op(OpSubstr).unwrap() // slot1
                 .add_op(OpEqualVerify).unwrap();
-            // different price?  rec1[16..24] != rec2[16..24]
-            b.add_i64(16).unwrap().add_i64(24).unwrap().add_op(OpSubstr).unwrap()            // price2
-                .add_op(OpSwap).unwrap().add_i64(16).unwrap().add_i64(24).unwrap().add_op(OpSubstr).unwrap() // price1
+            // different price?  rec1[16..32] != rec2[16..32]  (mant_be ‖ expo_be)
+            b.add_i64(16).unwrap().add_i64(32).unwrap().add_op(OpSubstr).unwrap()            // price2
+                .add_op(OpSwap).unwrap().add_i64(16).unwrap().add_i64(32).unwrap().add_op(OpSubstr).unwrap() // price1
                 .add_op(OpEqual).unwrap().add_op(OpNot).unwrap();
             b.drain()
         }
@@ -481,8 +497,8 @@ pub mod covenant {
                 .add_i64(0).unwrap().add_i64(16).unwrap().add_op(OpSubstr).unwrap()
                 .add_op(OpSwap).unwrap().add_i64(0).unwrap().add_i64(16).unwrap().add_op(OpSubstr).unwrap()
                 .add_op(OpEqualVerify).unwrap();
-            b.add_i64(16).unwrap().add_i64(24).unwrap().add_op(OpSubstr).unwrap()
-                .add_op(OpSwap).unwrap().add_i64(16).unwrap().add_i64(24).unwrap().add_op(OpSubstr).unwrap()
+            b.add_i64(16).unwrap().add_i64(32).unwrap().add_op(OpSubstr).unwrap()
+                .add_op(OpSwap).unwrap().add_i64(16).unwrap().add_i64(32).unwrap().add_op(OpSubstr).unwrap()
                 .add_op(OpEqual).unwrap().add_op(OpNot).unwrap();
             b.add_op(OpElse).unwrap();
             // --- reclaim branch: relative timelock + node schnorr ---
@@ -518,10 +534,12 @@ pub mod covenant {
                 .add_data(redeem).unwrap().drain()
         }
 
-        /// Off-chain pre-check of what the script enforces: same 24-byte layout,
-        /// same slot (pair-hash ‖ round), DIFFERENT price mantissa.
+        /// Off-chain pre-check of what the script enforces: same 32-byte v2
+        /// layout, same slot (pairId ‖ round), DIFFERENT price tail (mant ‖ expo).
+        /// 24-byte v1 records are rejected on length — the script's OpSubstr(16,32)
+        /// would abort on them anyway, so accepting them here would lie.
         pub fn is_equivocation(rec1: &[u8], rec2: &[u8]) -> bool {
-            rec1.len() == 24 && rec2.len() == 24 && rec1[..16] == rec2[..16] && rec1[16..24] != rec2[16..24]
+            rec1.len() == 32 && rec2.len() == 32 && rec1[..16] == rec2[..16] && rec1[16..32] != rec2[16..32]
         }
     }
 }
@@ -630,7 +648,7 @@ mod tests {
         let f = signed_feed();
         let c = Committee {
             threshold: 2, num_nodes: 3, signers: f.signers.clone(),
-            message: "kaspulse/v2".into(), covenant: "blake2b(price_bytes)".into(), updated_ts: 0,
+            message: "kaspulse/v2".into(), covenant: "withdrawn — unbound preimage, see MESSAGE-FORMAT".into(), updated_ts: 0,
         };
         assert!(f.verify_with_committee(&c).is_ok());
         let bad = Committee {
@@ -640,57 +658,68 @@ mod tests {
         assert!(f.verify_with_committee(&bad).is_err());
     }
 
-    #[test]
-    fn verify_covenant_threshold() {
+    /// Build the covenant attestation exactly as the pre-withdrawal server did:
+    /// authentic sigs from all 3 keys over blake2b(price_bytes(price_e8)).
+    fn legacy_cov(price_e8: u64) -> CovenantAttestation {
         let secp = secp256k1::Secp256k1::new();
         let keys: Vec<secp256k1::Keypair> = (1u8..=3)
             .map(|i| secp256k1::Keypair::from_secret_key(&secp, &secp256k1::SecretKey::from_slice(&[i; 32]).unwrap()))
             .collect();
-        let mut f = signed_feed();
-        let pb = {
-            // minimal script num for 2_900_000
-            let mut abs = 2_900_000u64; let mut out = Vec::new();
-            while abs > 0 { out.push((abs & 0xff) as u8); abs >>= 8; }
-            if out.last().unwrap() & 0x80 != 0 { out.push(0); }
-            out
-        };
+        let pb = price_bytes_e8(price_e8);
         let h = blake2b_simd::Params::new().hash_length(32).hash(&pb);
         let msg = secp256k1::Message::from_digest_slice(h.as_bytes()).unwrap();
-        let cov_sigs: Vec<String> = keys.iter().map(|k| hex::encode(secp.sign_schnorr_no_aux_rand(&msg, k).as_ref())).collect();
-        f.covenant = Some(CovenantAttestation {
-            price_e8: 2_900_000,
+        CovenantAttestation {
+            price_e8,
             price_bytes: hex::encode(&pb),
-            signatures: cov_sigs,
+            signatures: keys.iter().map(|k| hex::encode(secp.sign_schnorr_no_aux_rand(&msg, k).as_ref())).collect(),
             record: String::new(),
             record_signatures: vec![],
-        });
-        assert_eq!(f.verify_covenant().unwrap(), 2_900_000);
+        }
+    }
+
+    #[test]
+    fn verify_covenant_is_withdrawn_even_when_signatures_are_authentic() {
+        // The exact artifact the server used to publish: 3-of-3 genuine sigs over
+        // the true price's bytes, matching price_e8, on a feed that verify()s.
+        let mut f = signed_feed();
+        assert!(f.verify().is_ok(), "precondition: the v2 signatures are still good");
+        f.covenant = Some(legacy_cov(2_900_000));
+        let e = f.verify_covenant().expect_err("withdrawn domain must never return Ok");
+        assert!(e.contains("withdrawn"), "error must name the withdrawal, got: {e}");
     }
 
     #[test]
     fn verify_covenant_rejects_forged_price_e8() {
-        // The committee genuinely signs price_bytes for the TRUE price 2_900_000.
-        let secp = secp256k1::Secp256k1::new();
-        let keys: Vec<secp256k1::Keypair> = (1u8..=3)
-            .map(|i| secp256k1::Keypair::from_secret_key(&secp, &secp256k1::SecretKey::from_slice(&[i; 32]).unwrap()))
-            .collect();
-        let pb = price_bytes_e8(2_900_000);
-        let h = blake2b_simd::Params::new().hash_length(32).hash(&pb);
-        let msg = secp256k1::Message::from_digest_slice(h.as_bytes()).unwrap();
-        let cov_sigs: Vec<String> = keys.iter().map(|k| hex::encode(secp.sign_schnorr_no_aux_rand(&msg, k).as_ref())).collect();
-        // A lying server forges price_e8 on BOTH the feed and the covenant, but
-        // can't re-sign — price_bytes still encodes the true 2_900_000.
+        // Historic case: the committee genuinely signs price_bytes for the TRUE
+        // price 2_900_000, and a lying server forges price_e8 to 9_999_999 on
+        // both the feed and the covenant. The old field binding caught this;
+        // the withdrawal catches it too, one step earlier.
         let mut f = signed_feed();
         f.price_e8 = 9_999_999;
-        f.covenant = Some(CovenantAttestation {
-            price_e8: 9_999_999,
-            price_bytes: hex::encode(&pb), // authentic sigs cover THIS, not 9_999_999
-            signatures: cov_sigs,
-            record: String::new(),
-            record_signatures: vec![],
-        });
-        // Before the fix this returned 9_999_999 (a value no key signed); now it must reject.
+        let mut c = legacy_cov(2_900_000);
+        c.price_e8 = 9_999_999; // authentic sigs still cover 2_900_000's bytes
+        f.covenant = Some(c);
         assert!(f.verify_covenant().is_err(), "forged price_e8 must not pass covenant verification");
+    }
+
+    #[test]
+    fn verify_covenant_rejects_cross_pair_signature_reuse() {
+        // WHY the domain was withdrawn: the preimage carries no pair. BTC/USD's
+        // authentic sigs (price_e8 = 6.5e12) are a valid covenant attestation for
+        // a KAS/USD feed too — nothing in the signed bytes says otherwise. The
+        // only defence is to refuse the domain entirely.
+        let mut f = signed_feed();               // pair = KAS/USD
+        let btc = legacy_cov(6_524_045_000_000); // signed for BTC/USD, indistinguishable
+        f.price_e8 = 6_524_045_000_000;
+        f.covenant = Some(btc);
+        assert!(f.verify_covenant().is_err(), "cross-pair sig reuse must not verify");
+
+        // and the zero case: BONKEY/KANDA/KOMA quantize to price_e8 = 0, so the
+        // committee signed blake2b(empty) — satisfying every AtOrBelow gate.
+        let mut z = signed_feed();
+        z.price_e8 = 0;
+        z.covenant = Some(legacy_cov(0));
+        assert!(z.verify_covenant().is_err(), "blake2b(empty) attestation must not verify");
     }
 
     #[cfg(feature = "covenant")]
@@ -769,24 +798,36 @@ mod tests {
 
         #[test]
         fn attestation_record_layout() {
-            let r = bond::attestation_record("KAS/USD", 42, 2_900_000);
-            let h = blake2b_simd::Params::new().hash_length(32).hash(b"KAS/USD");
+            let r = bond::attestation_record("KAS/USD", 42, 2_900_000, -10);
+            assert_eq!(r.len(), 32);
+            let h = blake2b_simd::Params::new().hash_length(32).hash(b"kaspulse/bond/v2|KAS/USD");
             assert_eq!(&r[..8], &h.as_bytes()[..8]);
             assert_eq!(&r[8..16], &42u64.to_be_bytes());
             assert_eq!(&r[16..24], &2_900_000u64.to_be_bytes());
+            assert_eq!(&r[24..32], &(-10i64).to_be_bytes());
+            // v2 is domain-separated: a v1 record can never land in a v2 slot
+            let h1 = blake2b_simd::Params::new().hash_length(32).hash(b"KAS/USD");
+            assert_ne!(&r[..8], &h1.as_bytes()[..8]);
+            // and it must stay byte-identical to the oracle's copy in src/main.rs
+            assert_eq!(hex::encode(r).len(), 64);
         }
 
         #[test]
         fn is_equivocation_truth_table() {
-            let r1 = bond::attestation_record("KAS/USD", 42, 2_900_000);
-            let r2 = bond::attestation_record("KAS/USD", 42, 5_800_000); // same slot, different price
-            let r3 = bond::attestation_record("KAS/USD", 43, 5_800_000); // different round
-            let r4 = bond::attestation_record("BTC/USD", 42, 2_900_000); // different pair
+            let r1 = bond::attestation_record("KAS/USD", 42, 2_900_000, -10);
+            let r2 = bond::attestation_record("KAS/USD", 42, 5_800_000, -10); // same slot, different mant
+            let r3 = bond::attestation_record("KAS/USD", 43, 5_800_000, -10); // different round
+            let r4 = bond::attestation_record("BTC/USD", 42, 2_900_000, -10); // different pair
+            let r5 = bond::attestation_record("KAS/USD", 42, 2_900_000, -9);  // same mant, EXPO shifted 10x
             assert!(bond::is_equivocation(&r1, &r2));
             assert!(bond::is_equivocation(&r2, &r1));
+            // the v1 hole: without expo in the record this pair was byte-identical,
+            // so a 10x price move in one slot was provably unslashable
+            assert!(bond::is_equivocation(&r1, &r5));
             assert!(!bond::is_equivocation(&r1, &r1)); // same record — no conflict
             assert!(!bond::is_equivocation(&r1, &r3)); // honest update across rounds
             assert!(!bond::is_equivocation(&r1, &r4)); // different pair slot
+            assert!(!bond::is_equivocation(&r1[..24], &r2[..24])); // v1-length records rejected
             assert!(!bond::is_equivocation(&r1[..20], &r2[..20])); // wrong length
         }
 
@@ -803,8 +844,25 @@ mod tests {
             let redeem = with_reclaim.clone();
             let w = bond::reclaim_witness(&[0u8; 64], &redeem);
             assert!(!w.is_empty());
-            let sw = bond::slash_witness_if(&[0u8; 24], &[0u8; 64], &[0u8; 24], &[0u8; 64], &redeem);
+            let sw = bond::slash_witness_if(&[0u8; 32], &[0u8; 64], &[0u8; 32], &[0u8; 64], &redeem);
             assert!(sw.len() > w.len());
+        }
+
+        #[test]
+        fn bond_scripts_substr_the_v2_price_tail() {
+            // The compared price tail must be [16..32] (mant ‖ expo), not v1's
+            // [16..24] — otherwise a 32-byte record's expo is never checked and
+            // the script silently reverts to the unslashable-10x-move hole.
+            use kaspa_txscript::{opcodes::codes::OpSubstr, script_builder::ScriptBuilder};
+            let frag = |a: i64, b: i64| ScriptBuilder::new()
+                .add_i64(a).unwrap().add_i64(b).unwrap().add_op(OpSubstr).unwrap().drain();
+            let count = |hay: &[u8], n: &[u8]| hay.windows(n.len()).filter(|w| *w == n).count();
+            let pk = committee()[0];
+            for redeem in [bond::bond_redeem(&pk), bond::bond_redeem_with_reclaim(&pk, 86_400)] {
+                assert_eq!(count(&redeem, &frag(0, 16)), 2, "two slot slices");
+                assert_eq!(count(&redeem, &frag(16, 32)), 2, "two v2 price-tail slices");
+                assert_eq!(count(&redeem, &frag(16, 24)), 0, "no v1 (16,24) price slice may remain");
+            }
         }
     }
 }

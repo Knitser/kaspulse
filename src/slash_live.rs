@@ -30,7 +30,8 @@ use std::time::Duration;
 const FEE: u64 = 500_000;
 
 fn blake32(b: &[u8]) -> [u8; 32] { let h = blake2b_simd::Params::new().hash_length(32).hash(b); let mut o = [0u8; 32]; o.copy_from_slice(h.as_bytes()); o }
-fn record(pair: &str, round: u64, mant: u64) -> Vec<u8> { attestation_record(pair, round, mant).to_vec() }
+/// 32 bytes: slot(pairId[0..8] ‖ round_be[8..16]) ‖ price(mant_be[16..24] ‖ expo_be[24..32])
+fn record(pair: &str, round: u64, mant: u64, expo: i32) -> Vec<u8> { attestation_record(pair, round, mant, expo).to_vec() }
 fn node_sign(kp: &Keypair, rec: &[u8]) -> Vec<u8> { kp.sign_schnorr(Message::from_digest_slice(&blake32(rec)).unwrap()).as_ref().to_vec() }
 
 fn load_key() -> Result<Keypair> {
@@ -83,8 +84,8 @@ async fn main() -> Result<()> {
     tokio::time::sleep(Duration::from_secs(25)).await;
 
     // the node EQUIVOCATES: two prices for the same (pair, round)
-    let rec1 = record("KAS/USD", 42, 2_900_000);
-    let rec2 = record("KAS/USD", 42, 5_800_000);
+    let rec1 = record("KAS/USD", 42, 2_900_000, -10);
+    let rec2 = record("KAS/USD", 42, 5_800_000, -10);
     let (sig1, sig2) = (node_sign(&node, &rec1), node_sign(&node, &rec2));
     println!("\n⚠️  caught: the node signed KAS/USD round 42 as BOTH $0.029 AND $0.058 — equivocation.");
 

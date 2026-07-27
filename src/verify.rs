@@ -143,7 +143,7 @@ fn main() {
     }
 
     // (2) independent price sanity-check on KAS/USD (re-fetch the market myself)
-    println!("\nindependent KAS/USD check (re-fetching exchanges myself):");
+    println!("\nindependent KAS/USD check (re-fetching exchanges myself — accepted under 1% drift):");
     let src = fetch_sources();
     for (n, p) in &src { println!("  {n}: ${p:.6}"); }
     let mine = median(&src.iter().map(|(_, p)| *p).collect::<Vec<_>>());
@@ -153,7 +153,7 @@ fn main() {
     println!("  my median ${mine:.6}  vs  feed ${theirs:.6}  ({drift:.2}% drift) {}", if price_ok { "✓" } else { "⚠ (moved / off)" });
 
     // (3) reproduce every KRC-20 price straight from its on-chain pool
-    println!("\nindependent KRC-20 check (re-reading the DEX pools myself):");
+    println!("\nindependent KRC-20 check (re-reading the DEX pools myself — accepted inside each token's own venue range ±12%):");
     let pools = load_pools();
     let pools_ok = if pools.is_empty() {
         println!("  (pools.json not found — skipping)"); true
@@ -183,7 +183,7 @@ fn main() {
     };
 
     println!("\n{}", if all_sig_ok && price_ok && pools_ok {
-        "VERDICT: honest — every feed signed by the threshold, KAS matches the market, and the KRC-20 pools reproduce on-chain. No trust required."
+        "VERDICT: consistent — every feed carries a valid threshold signature, KAS/USD is within 1% of my own median, and every KRC-20 feed sits inside its own venues' ±12% band.\n  This is a SANITY CHECK, not a full re-derivation: BTC/USD and ETH/USD are signature-checked only, and ±12% is a wide band on a thin pool. What it does prove is that the inputs are public and the method is reproducible — go read src/verify.rs and tighten it yourself."
     } else {
         "VERDICT: something's off — see above."
     });

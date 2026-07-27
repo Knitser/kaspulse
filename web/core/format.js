@@ -5,8 +5,9 @@
 
 export const STATUS =
   'The oracle, the signatures and every number on this page are live and real — ' +
-  'verify one yourself below. On-chain consumers (price gates, slashing) are ' +
-  'proven on Kaspa testnet-10; mainnet publishing is next.';
+  'verify one yourself below. On-chain consumers (price gates, slashing) ran on ' +
+  'Kaspa testnet-10; the bond record changed on 2026-07-27, so the slashing ' +
+  'script is currently proven on the real script VM and awaits a fresh TN10 run.';
 
 export const AS_OF = 'as of July 2026';
 

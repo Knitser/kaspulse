@@ -18,14 +18,14 @@ fn main() {
     println!("bonded oracle node key: {}\n", hex::encode(npk));
 
     // the node EQUIVOCATES: two prices for the same (pair, round) slot
-    let rec1 = attestation_record("KAS/USD", 42, 2_900_000); // $0.029
-    let rec2 = attestation_record("KAS/USD", 42, 5_800_000); // $0.058 — same slot!
+    let rec1 = attestation_record("KAS/USD", 42, 2_900_000, -10); // $0.029
+    let rec2 = attestation_record("KAS/USD", 42, 5_800_000, -10); // $0.058 — same slot!
     println!("rec1 (KAS/USD #42 @ $0.029): {}", hex::encode(rec1));
     println!("rec2 (KAS/USD #42 @ $0.058): {}", hex::encode(rec2));
     println!("is_equivocation(rec1, rec2)  → {}", is_equivocation(&rec1, &rec2));
 
     // an honest price update in the NEXT round is not a conflict
-    let rec3 = attestation_record("KAS/USD", 43, 5_800_000);
+    let rec3 = attestation_record("KAS/USD", 43, 5_800_000, -10);
     println!("is_equivocation(rec1, rec3)  → {}  (different round — honest update)", is_equivocation(&rec1, &rec3));
 
     // build the on-chain proof: the redeem the bond sits behind + the witness

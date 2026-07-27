@@ -177,13 +177,29 @@
       are the same code this repo proved on testnet-10 (<code>consumer_live</code>,
       <code>slash_live</code>). Testnet runs are ephemeral, so no stale txids are pinned here —
       wherever you see a <code>‹value›</code> in angle quotes, the tool prints your own fresh one,
-      explorer-linked, as you run. Two things to know: <strong>(1)</strong> the hosted committee
-      now dual-signs — the API message format <em>and</em> <code>blake2b(price_bytes)</code>
-      under each feed's <code>covenant</code> object (see <code>/v1/committee</code> +
-      <code>Feed::verify_covenant</code>). This guide's local 3-key <em>demo committee</em>
-      remains the offline walkthrough; production gates should use hosted covenant sigs.
-      <strong>(2)</strong> on-chain consumers are proven on
-      <em>testnet-10</em>; standing feeds via <code>cargo run --bin standing --features onchain</code>
+      explorer-linked, as you run. Two things to know: <strong>(1)</strong>
+      <strong>the hosted covenant signature was withdrawn on 2026-07-27.</strong> Feeds used to
+      carry <code>covenant.signatures</code> — committee sigs over
+      <code>blake2b(price_bytes)</code> — and this box used to tell you to gate production on
+      them. That domain signed a bare integer: no pair, no exponent, no round, no timestamp. A
+      signature for BTC/USD's number therefore satisfied any gate on any pair with a lower
+      strike, so the field is gone and <code>Feed::verify_covenant</code> refuses it. A bound
+      <code>kaspulse/cov/v2</code> preimage is designed
+      (<a href="https://github.com/Knitser/kaspulse/blob/main/docs/MESSAGE-FORMAT.md">MESSAGE-FORMAT.md</a>
+      §8.0) but <em>not shipped</em>. Until it is, the local 3-key <em>demo committee</em> this
+      guide generates is the <em>only</em> committee that signs a covenant encoding — the
+      walkthrough below is a learning path, not a production one. <code>consumer_live</code>
+      switched to that same demo committee on 2026-07-27 for the same reason: it broadcasts its
+      signatures in a public TN10 witness, so running it with the hosted keys would have published
+      on-chain exactly the artifact the withdrawal removed from the API. And note what withdrawal
+      does <em>not</em> mean: the committee keys are unchanged, so any covenant-domain signature
+      captured while the field was live still verifies. That is why nobody may build a gate on the
+      hosted committee — not because the old signatures broke.
+      <strong>(2)</strong> on-chain consumers ran on
+      <em>testnet-10</em>. The bond record widened to 32 bytes on 2026-07-27 (a different script
+      and a different P2SH), so the shipped slashing covenant is proven on the real script engine
+      and its TN10 re-run is pending. Standing feeds via
+      <code>cargo run --bin standing --features onchain</code>
       publish to TN10 on deviation + heartbeat. Mainnet publish is next.
       (The one canonical status block is the README's <em>“Status, honestly”</em> section —
       this box makes the same claims, never stronger.)
@@ -298,10 +314,27 @@ curl -s $BASE/v1/feed/KAS-USD | jq '{pair, price, mant, expo, signed_ts, message
       signatures cover another.)
     </p>
     <p>
-      <strong>Level 3 — trust nothing, re-derive everything.</strong>
-      <code>cargo run --bin verify</code> checks every feed's signatures, then goes around the
-      oracle entirely: it re-fetches the exchanges itself, recomputes the median, and re-reads the
-      KRC-20 DEX pools on-chain:
+      <strong>Level 3 — go around the oracle entirely.</strong>
+      <code>cargo run --bin verify</code> checks every feed's signatures, then re-fetches the
+      exchanges itself and re-reads the KRC-20 DEX pools on-chain. Read it as a
+      <em>sanity check with published tolerances</em>, not a full re-derivation — here is exactly
+      what it does and doesn't do (<code>src/verify.rs</code>, ~220 lines, go tighten it):
+    </p>
+    <ul>
+      <li>every feed: all signatures verified against the committee — no tolerance, pass/fail;</li>
+      <li>KAS/USD: its own median of Kraken/KuCoin/Gate/Bybit/MEXC, accepted under <strong>1%</strong>
+          drift. It polls its own venue list, so it can include an exchange the server's own IP
+          can't reach, and exclude nothing — the two medians are close, not identical by
+          construction;</li>
+      <li>KRC-20: each feed accepted if it lands inside that token's own venue range widened by
+          <strong>±12%</strong>. That is a wide band, deliberately — the feed is a 12-sample TWAP
+          and the auditor reads spot — but it is wide;</li>
+      <li><strong>BTC/USD and ETH/USD are not re-derived at all</strong> — signature-checked only.</li>
+    </ul>
+    <p>
+      What that proves is narrower than "trustless" and still the thing no TEE can offer: the
+      inputs are public, the method is published, and a stranger can re-read the same pools and
+      tickers and check the work.
     </p>
     <div class="runlabel live">▶ captured from a live run, July 2026 (trimmed — one line per feed)</div>
     <pre><code>cargo run --bin verify
@@ -311,20 +344,24 @@ curl -s $BASE/v1/feed/KAS-USD | jq '{pair, price, mant, expo, signed_ts, message
 <span class="o">  ✓ BTC/USD    5/5 valid</span>
 <span class="o">  ✓ ETH/USD    5/5 valid</span>
 <span class="c">  … one line per feed (24 feeds at this run) …</span>
-<span class="o">independent KAS/USD check (re-fetching exchanges myself):</span>
+<span class="o">independent KAS/USD check (re-fetching exchanges myself — accepted under 1% drift):</span>
 <span class="o">  Kraken: $0.027870</span>
 <span class="o">  KuCoin: $0.027900</span>
 <span class="o">  Gate.io: $0.027850</span>
 <span class="o">  Bybit: $0.027890</span>
 <span class="o">  MEXC: $0.027872</span>
 <span class="o">  my median $0.027872  vs  feed $0.027890  (0.06% drift) ✓</span>
-<span class="o">independent KRC-20 check (re-reading the DEX pools myself):</span>
+<span class="o">independent KRC-20 check (re-reading the DEX pools myself — accepted inside each</span>
+<span class="o">token's own venue range ±12%):</span>
 <span class="o">  20 tokens re-read on-chain · 20 reproduce the feed (within TWAP tolerance)</span>
-<span class="o">VERDICT: honest — every feed signed by the threshold, KAS matches the market,</span>
-<span class="o">and the KRC-20 pools reproduce on-chain. No trust required.</span></code></pre>
+<span class="o">VERDICT: consistent — every feed carries a valid threshold signature, KAS/USD is</span>
+<span class="o">within 1% of my own median, and every KRC-20 feed sits inside its own venues'</span>
+<span class="o">±12% band.</span>
+<span class="o">  This is a SANITY CHECK, not a full re-derivation: BTC/USD and ETH/USD are</span>
+<span class="o">  signature-checked only, and ±12% is a wide band on a thin pool.</span></code></pre>
     <p>
-      You just audited the oracle. Everything after this point makes <em>Kaspa L1 itself</em> do
-      that audit — at spend time, in script.
+      Everything after this point makes <em>Kaspa L1 itself</em> do the checking — at spend time,
+      in script, with no tolerance at all.
     </p>
 
     <h2 id="covenant"><span class="stepno">2</span>The covenant Kaspa will enforce</h2>
@@ -372,6 +409,21 @@ curl -s $BASE/v1/feed/KAS-USD | jq '{pair, price, mant, expo, signed_ts, message
       is exactly why this guide generates a local demo committee (see the
       <a href="#honest">honest box</a>).
     </p>
+    <div class="callout trap">
+      <p><strong>Dated note, 2026-07-27 — what the TN10 runs on this page prove.</strong>
+      Every on-chain result quoted here (<code>consumer_live</code>, <code>gate deploy/spend</code>,
+      and the txids the tools print for you) exercised the script above: a bare
+      <code>price_bytes</code> comparison plus committee <code>OpCheckSigFromStack</code>s. That
+      flow is real and it ran — but it demonstrates the <em>original, unbound</em> covenant
+      design, the one whose preimage is a naked integer. It is the reason the hosted covenant
+      signature was withdrawn.</p>
+      <p>Read those runs as proof that <strong>Kaspa L1 enforces committee signatures at spend
+      time</strong> — which is the claim this guide is actually making, and which does not
+      change. Do <em>not</em> read them as proof of a production price gate. When
+      <code>kaspulse/cov/v2</code> ships, the redeem script gains an <code>OpSubstr</code> prefix
+      check binding tag‖pair‖expo, this table changes, and the whole flow will be re-run and
+      re-proven on TN10 before anything here recommends it.</p>
+    </div>
 
     <h2 id="deploy"><span class="stepno">3</span>Deploy it</h2>
     <p>
@@ -543,39 +595,54 @@ price_gate_redeem_dir(&amp;committee, strike_e8, Gate::AtOrBelow)</code></pre>
     <h3>What keeps nodes honest: the equivocation bond</h3>
     <p>
       A price gate is only as good as the committee's honesty — so kaspulse's economic-security
-      story is a covenant too. Alongside every round, a node signs a fixed <strong>24-byte
-      attestation record</strong>: <code>blake2b(pair)[0..8] ‖ round_be ‖ mant_be</code>. Sign two
-      <em>different</em> prices for the <em>same</em> slot and those two records are a
+      story is a covenant too. Alongside every round, a node signs a fixed <strong>32-byte
+      attestation record</strong>:
+      <code>blake2b("kaspulse/bond/v2|" ‖ pair)[0..8] ‖ round_be ‖ mant_be ‖ expo_be</code>. Sign
+      two <em>different</em> prices for the <em>same</em> slot and those two records are a
       cryptographic proof of double-signing — and a bond covenant
       (<code>covenant::bond::bond_redeem</code>) lets <em>anyone</em> who holds that proof seize
       the node's bond, verified purely by Kaspa L1 script. Real records, which you can recompute
-      (blake2b-256(<code>"KAS/USD"</code>) starts <code>b84ad8389aa2ebb0…</code>):
+      (blake2b-256(<code>"kaspulse/bond/v2|KAS/USD"</code>) starts <code>9dab6487a796ddcb…</code>):
     </p>
     <div class="table-scroll"><table>
-      <tr><th></th><th>slot: pair-id ‖ round 42</th><th>price (mant, big-endian)</th></tr>
-      <tr><td><code>rec1</code> ($0.029)</td><td><code>b84ad8389aa2ebb0 000000000000002a</code></td><td><code>00000000002c4020</code></td></tr>
-      <tr><td><code>rec2</code> ($0.058)</td><td><code>b84ad8389aa2ebb0 000000000000002a</code></td><td><code>0000000000588040</code></td></tr>
+      <tr><th></th><th>slot: pair-id ‖ round 42</th><th>price: mant_be ‖ expo_be</th></tr>
+      <tr><td><code>rec1</code> ($0.029)</td><td><code>9dab6487a796ddcb 000000000000002a</code></td><td><code>00000000002c4020 fffffffffffffff6</code></td></tr>
+      <tr><td><code>rec2</code> ($0.058)</td><td><code>9dab6487a796ddcb 000000000000002a</code></td><td><code>0000000000588040 fffffffffffffff6</code></td></tr>
+      <tr><td><code>rec5</code> ($0.29)</td><td><code>9dab6487a796ddcb 000000000000002a</code></td><td><code>00000000002c4020 <b>fffffffffffffff7</b></code></td></tr>
     </table></div>
     <p>
-      Same first 16 bytes, different last 8 → slashable. The script checks exactly four things
-      (two <code>OpCheckSigFromStack</code>s, an <code>OpSubstr</code> slot-equality, an
-      <code>OpSubstr</code> price-inequality) — which yields four cases, and only one of them
-      slashes. This run is the local Kaspa script engine executing the real bond covenant:
+      Same first 16 bytes, different last 16 → slashable. <code>rec5</code> is why the record
+      carries <code>expo</code>: it is the <em>same mantissa</em> at a 10× different exponent, and
+      under the older 24-byte layout (pair id <code>b84ad8389aa2ebb0</code>, no expo) it produced
+      byte-identical records — a 10× price move was provably <em>un</em>slashable. The record
+      changed on <strong>2026-07-27</strong>; a bond posted behind the old redeem cannot be
+      slashed with a new record and must be redeployed.
+    </p>
+    <p>
+      The script checks exactly four things (two <code>OpCheckSigFromStack</code>s, an
+      <code>OpSubstr</code> slot-equality, an <code>OpSubstr</code> price-inequality). This run is
+      the local Kaspa script engine executing the real bond covenant:
     </p>
     <div class="runlabel live">▶ captured from a live run, July 2026</div>
     <pre><code>cargo run --bin slash --features onchain
-<span class="o">bonded oracle node key: af36ed050dd1919b7c1aaefe586232c6b8ba9fb7b88fcbcd70ae64766f295163</span>
+<span class="o">bonded oracle node key: 465a6193ca4f668cae94e623a79756605c58cc665f5864667a1ed96acd329485</span>
 <span class="o">[1] real equivocation (slot=KAS/USD#42, $0.029 vs $0.058) → bond SLASHED: true</span>
 <span class="o">[2] different rounds (honest update)          → NOT slashable: true</span>
 <span class="o">[3] same price twice (no conflict)            → NOT slashable: true</span>
 <span class="o">[4] forged 2nd sig (attacker's key)           → NOT slashable: true</span>
+<span class="o">[5] expo-only 10x move (same mant)            → bond SLASHED: true</span>
 <span class="o">✅ Script-enforced slashing WORKS. A node that double-signs a price loses its bond to</span>
 <span class="o">   whoever catches it — verified purely by Kaspa L1 (OpCat/OpSubstr/OpCheckSigFromStack),</span>
 <span class="o">   no committee and no governance.</span></code></pre>
     <p>
       And it ran on the real chain, not just the local engine: <code>slash_live</code> posts a real
       3-TKAS bond on TN10 and then slashes it with a real double-signing proof — we slashed our own
-      bond, on purpose. Reproduce it end-to-end (your own bond, your own fresh txids):
+      bond, on purpose. <strong>Honest caveat, 2026-07-27:</strong> that TN10 run used the older
+      24-byte record, and widening the record to 32 bytes changed <code>bond_redeem</code>'s
+      <code>OpSubstr</code> indices — a different script and a different P2SH address. The shipped
+      script is proven on the real script engine (the run above); the TN10 re-run is pending, so
+      don't read the older txids as proof of what ships today. Reproduce it end-to-end yourself
+      (your own bond, your own fresh txids):
     </p>
     <pre><code>cargo run --bin slash_live --features onchain
 <span class="o">🔒 BONDED — 3.00 TKAS posted by the node behind the slashing covenant</span>
@@ -584,9 +651,11 @@ price_gate_redeem_dir(&amp;committee, strike_e8, Gate::AtOrBelow)</code></pre>
 <span class="o">💥 SLASHED — the bond was seized on-chain by proving the double-signing, verified by Kaspa L1.</span>
 <span class="o">   tx ‹your slash txid›</span></code></pre>
     <p>
-      One honest limitation, stated in the code itself: the bond covenant ships its
-      <em>slashing</em> path only — the honest node's reclaim-timelock branch is marked unproven in
-      <code>src/slash.rs</code>, so the SDK does not expose it until it is proven. The operator's
+      One honest limitation: the <code>slash</code> bin exercises the <em>slashing</em> path only.
+      The honest node's reclaim-timelock branch does exist in the SDK
+      (<code>bond_redeem_with_reclaim</code> + <code>reclaim_witness</code>) and is covered by unit
+      tests, but a live reclaim has not been run on TN10 — treat a posted bond as one-way until it
+      has. The operator's
       view of bonds, monitoring, and running a signer of your own:
       <code>docs/OPERATOR.md</code> in the repo (also linked from <a href="/#/docs">the docs hub</a>).
     </p>

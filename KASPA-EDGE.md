@@ -55,11 +55,35 @@ are *affordable* — on Ethereum L1 the same cadence would cost thousands of
 dollars a day per feed. Cheap blockspace is what turns "fast oracle" from a
 demo into a sustainable service.
 
-### 6. The ecosystem moment — first-mover on a chain that just became programmable
+### 6. The ecosystem moment — but check which seat is actually empty
 Toccata activated on mainnet June 30, 2026. Kaspa DeFi (Kasplex, Igra, the
-DEXs) is being built *right now* and every piece of it will need prices. There
-is no incumbent oracle. Being first on Ethereum in 2017 made Chainlink; the
-same seat on Kaspa is currently empty.
+DEXs) is being built *right now* and every piece of it will need prices.
+
+**Correction, 2026-07-27: "there is no incumbent oracle" was wrong, and it is
+one link from being refuted.** Kaskad's COB Oracle has been live on Igra
+mainnet since ~May 2026 — an AWS Nitro enclave consolidating 15+ exchange order
+books, PCR0 measurement verified on-chain by `NitroAttestationVerifier.sol`,
+~30 s cadence, Sherlock-audited (Apr 2026), KEF-funded, and shipped as a
+Chainlink `AggregatorV3` wrapper that drops straight into Aave-style config,
+behind the only live lending market on Kaspa. That is an incumbent by any
+honest definition, and for an audited KAS mark on Igra today it is the right
+tool.
+
+The seats that *are* empty are narrower and better:
+- **L1 covenants.** A price a Kaspa coin enforces itself at spend time via
+  `OpCheckSigFromStack`. An enclave publishing to an EVM contract cannot do
+  this — it is a different layer, not a missing feature.
+- **KRC-20.** Neither COB nor QUEX prices a single Kaspa-native token. 55+ of
+  them are priced here, and nowhere else.
+- **Reproducibility.** A TEE attestation proves an enclave signed something; it
+  can never prove the code inside computed the right number. Kaskad's own
+  roadmap concedes the point by listing a "trustless" COB V2 as still in R&D.
+  Our inputs are public and our method is published, so a stranger can re-read
+  the same pools and tickers and check the work — which is a weaker guarantee
+  in theory and a stronger one in practice.
+
+What we do not have and should not imply: an audit, funding, or a production
+consumer. Kaskad has all three.
 
 ### 7. Native alignment — the oracle also *prices* this ecosystem
 kaspulse reads Kasplex/Igra pools directly; only a Kaspa-native oracle will

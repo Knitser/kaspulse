@@ -1,7 +1,8 @@
 //! kaspulse consumer_live — a THRESHOLD price-gated consumer covenant, live on
 //! TN10. Fixes the reality-check's "3-of-5 is cosmetic" finding: the payout
-//! releases only when 3 INDEPENDENT oracle node keys each signed the price AND
+//! releases only when 3 INDEPENDENT committee keys each signed the price AND
 //! price >= strike — all enforced by Kaspa L1 script, not off-chain trust.
+//! (The 3 keys are a local demo committee — see HONEST below.)
 //!
 //! redeem (committee pk0,pk1,pk2, strike):
 //!   OpDup <strike> OpGreaterThanOrEqual OpVerify   (price >= strike)
@@ -13,6 +14,18 @@
 //! Script + witness come from kaspulse-sdk (`covenant::price_gate_redeem`,
 //! `price_gate_witness`, `price_bytes`) — the SDK ships the byte-identical
 //! script this bin proved on TN10.
+//!
+//! HONEST, and load-bearing: the committee here is a LOCAL DEMO committee
+//! (`gate-node-{0,1,2}.key`, the same files `gate keygen` writes) — never the
+//! hosted `kaspulse-node-*.key` committee. It signed blake2b(price_bytes) with
+//! the real committee keys until 2026-07-27; that was wrong, because this bin
+//! BROADCASTS those signatures in a public TN10 witness, so every run minted a
+//! permanent, scrapeable attestation over a bare integer that would satisfy any
+//! hosted-committee `price_gate_redeem` with a lower strike. Withdrawing
+//! `covenant.signatures` from /v1/feed only closed the HTTP path; the chain is
+//! also a path. There is no hosted committee in this script and there must not
+//! be one until the bound cov/v2 preimage ships (see TODO(cov/v2) in
+//! src/main.rs). See also src/gate.rs and /guide.html#honest.
 //!
 //! Run: cargo run --bin consumer_live --features onchain
 
@@ -49,9 +62,19 @@ fn fetch_kas_e8() -> i64 {
 }
 fn blake32(b: &[u8]) -> [u8; 32] { let h = blake2b_simd::Params::new().hash_length(32).hash(b); let mut o = [0u8; 32]; o.copy_from_slice(h.as_bytes()); o }
 
+/// DEMO committee member i — `gate-node-{i}.key`, generated on first use.
+/// NOT `kaspulse-node-{i}.key`: those are the production committee keys, and the
+/// signatures this bin produces land in a public, permanent TN10 witness.
 fn node_key(i: usize) -> Keypair {
-    let raw = std::fs::read_to_string(format!("kaspulse-node-{i}.key")).expect("run the oracle once to create node keys");
-    Keypair::from_secret_key(SECP256K1, &secp256k1::SecretKey::from_slice(&hex::decode(raw.trim()).unwrap()).unwrap())
+    let path = format!("gate-node-{i}.key");
+    if let Some(kp) = std::fs::read_to_string(&path).ok()
+        .and_then(|raw| hex::decode(raw.trim()).ok())
+        .and_then(|b| secp256k1::SecretKey::from_slice(&b).ok())
+        .map(|sk| Keypair::from_secret_key(SECP256K1, &sk)) { return kp; }
+    let kp = Keypair::new(SECP256K1, &mut secp256k1::rand::thread_rng());
+    std::fs::write(&path, hex::encode(kp.secret_key().secret_bytes())).expect("write demo committee key");
+    println!("wrote {path} (demo committee — the same files `gate keygen` writes)");
+    kp
 }
 
 fn load_key() -> Result<Keypair> {
@@ -76,7 +99,8 @@ async fn main() -> Result<()> {
     let pks: Vec<[u8; 32]> = committee.iter().map(|k| k.public_key().x_only_public_key().0.serialize()).collect();
     let price_e8 = fetch_kas_e8();
     let strike: i64 = 2_000_000; // $0.02 — below market, so the payout triggers
-    println!("KAS/USD = ${:.6}  ·  strike $0.02  ·  committee 3 oracle nodes", price_e8 as f64 / 1e8);
+    println!("KAS/USD = ${:.6}  ·  strike $0.02  ·  committee: 3 LOCAL DEMO nodes (gate-node-*.key)", price_e8 as f64 / 1e8);
+    println!("  (not the hosted kaspulse committee — the hosted covenant domain is withdrawn; see the file header)");
 
     let pb = price_bytes(price_e8);
     let msg_hash = blake32(&pb);
@@ -103,7 +127,7 @@ async fn main() -> Result<()> {
         let signed = sign(MutableTransaction::with_entries(tx, vec![entry]), key);
         let rpc: kaspa_rpc_core::RpcTransaction = (&signed.tx).into();
         let id = client.submit_transaction(rpc, false).await.context("deploy failed")?;
-        println!("🎟️  DEPLOYED — {:.2} TKAS behind \"KAS ≥ $0.02, signed by 3 oracle nodes\"", value as f64 / 1e8);
+        println!("🎟️  DEPLOYED — {:.2} TKAS behind \"KAS ≥ $0.02, signed by 3 demo committee nodes\"", value as f64 / 1e8);
         println!("   tx {id}");
         signed.tx.id()
     };
@@ -137,7 +161,7 @@ async fn main() -> Result<()> {
     let rpc: kaspa_rpc_core::RpcTransaction = (&mtx.tx).into();
     match client.submit_transaction(rpc, false).await {
         Ok(id) => {
-            println!("\n💸 UNLOCKED — released {:.2} TKAS because 3 oracle nodes signed KAS ≥ $0.02.", payout as f64 / 1e8);
+            println!("\n💸 UNLOCKED — released {:.2} TKAS because 3 demo committee nodes signed KAS ≥ $0.02.", payout as f64 / 1e8);
             println!("   Kaspa L1 verified 3 independent signatures + the price condition. The threshold is REAL, not cosmetic.");
             println!("   tx {id}");
         }

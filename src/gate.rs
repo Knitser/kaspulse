@@ -11,9 +11,20 @@
 //!     spend   --strike <USD> [--dir .]          sign the live oracle price, build witness, spend
 //!     demo    --strike <USD> --value <KAS>      deploy → wait for confirm → spend
 //!
-//! HONEST: this uses a DEMO committee (local gate-node-*.key files) — the
-//! hosted committee signs the v2 message string, not blake2b(price_bytes);
-//! see /guide.html#honest.
+//! HONEST: this uses a DEMO committee (local gate-node-*.key files), and it can
+//! ONLY use a demo committee. The hosted committee signed blake2b(price_bytes)
+//! until that domain was WITHDRAWN: price_bytes is a bare integer with no pair,
+//! expo, round or ts, so one feed's sigs unlock any gate on any other pair with
+//! a lower strike, and feeds quantizing to price_e8=0 carry valid sigs over
+//! blake2b(empty) — permanently satisfying every AtOrBelow gate. /v1/feed no
+//! longer publishes `covenant.signatures`, and `consumer_live` / `onchain` were
+//! moved onto these same demo keys on 2026-07-27 (they broadcast their sigs in a
+//! public TN10 witness, so the chain was the second hosted path) — there is no
+//! hosted path into this script and there must not be one until the bound cov/v2
+//! preimage ships (see the TODO(cov/v2) in src/main.rs). The hosted committee
+//! signs the v2 message string only. Note that withdrawal is not revocation: the
+//! committee keys are unchanged, so any covenant-domain signature captured while
+//! the field was live still verifies. See /guide.html#honest.
 
 #![allow(deprecated)]
 use anyhow::{bail, Context, Result};
@@ -194,8 +205,10 @@ async fn spend(client: &KaspaRpcClient, key: &Keypair, keys: &[Keypair], redeem:
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("kaspulse gate — demo committee (local keys) — the hosted committee signs the v2");
-    println!("message string, not price_bytes; see /guide.html#honest\n");
+    println!("kaspulse gate — DEMO committee (local keys). The hosted committee signs the v2");
+    println!("message string only: the blake2b(price_bytes) domain is WITHDRAWN (unbound");
+    println!("preimage — no pair/expo/round/ts), so /v1/feed publishes no covenant.signatures");
+    println!("and this script has no hosted path. See /guide.html#honest\n");
     let a = Args::parse()?;
     match a.sub.as_str() {
         "keygen" => {

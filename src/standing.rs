@@ -138,10 +138,11 @@ async fn main() -> Result<()> {
             std::thread::sleep(Duration::from_secs(5));
             continue;
         }
-        match feed.verify_covenant() {
-            Ok(pe8) => println!("covenant ok · price_e8={pe8}"),
-            Err(e) => eprintln!("covenant warn: {e} (continuing with v2 sigs)"),
-        }
+        // No covenant check: the unbound blake2b(price_bytes) domain is withdrawn
+        // (it bound no pair/expo/round, so one feed's sigs unlocked every gate).
+        // verify_covenant() now always errors; calling it here would print the
+        // withdrawal notice on every publish. The v2 committee sigs above are the
+        // real authentication. See docs/MESSAGE-FORMAT.md §8.0.
 
         let price = feed.value();
         let ts = now();

@@ -121,6 +121,35 @@ PORT=8080 ./target/release/oracle
 Dashboard at `/`, API at `/v1/feed` (legacy `/api/feed` and `/feed.json`
 remain forever as aliases).
 
+**The service's working directory must be writable.** The oracle writes
+`round.hwm` there (the `signer` bin writes `signer-round.hwm`) — the monotonic
+round-slot high-water mark. `round` is derived from the wall clock, so a fresh
+box with a correct clock is fine; the file exists only so a backwards clock step
+can't re-issue a slot the committee already signed (that would be a genuine
+equivocation proof against our own keys).
+
+It is a **reservation, not a log**: the oracle writes `round + 150` *before*
+issuing `round` (tmp-file + rename, so a crash mid-write can't leave a short
+file), which means the number on disk is always an **upper bound** on everything
+ever signed. A restart therefore skips up to ~60 s of round numbers. Gaps are
+free; replays are not.
+
+Operating rules, in the order they bite:
+
+- **A VM snapshot restore rewinds the file together with the clock.** That is
+  the dangerous case, not the safe one: the restored `round.hwm` is a floor from
+  *before* the rounds that were published after the snapshot, and the restored
+  clock agrees with it, so nothing detects the replay. After restoring a
+  snapshot, **manually set `round.hwm` above the last round you published**
+  (`curl -s https://pulse.kascov.io/v1/feed | jq .round` from the archive, or
+  `date +%s%3N` divided by 400) *before* starting the service.
+- Restoring an old `round.hwm` onto a box with a *correct forward* clock is
+  harmless — the wall-clock slot is already far above the stale floor.
+- Never run two oracles with the same keys in the same directory.
+- A backwards clock step logs `KASPULSE_ROUND_REGRESSION` and keeps going at
+  `hwm+1`. An unreadable file logs `KASPULSE_ROUND_HWM_UNREADABLE` and means
+  there is **no** replay floor for that boot — treat it as a page.
+
 ## Own-node config (removes the last third party)
 
 Set the RPC envs to your own Kasplex/Igra nodes (+ a public one to cross-check):
@@ -141,16 +170,29 @@ exposes `/attest`; an aggregator polls them for the k-of-n. See `src/signer.rs`.
 
 ## Notes / later
 
-- If a CDN is ever put in front, keep API clients pointed at the `run.app`
-  origin directly (kascov lesson: CDN buffering vs `no-store` responses).
-- Later, not built: publishing the five committee x-only pubkeys as a
-  first-class artifact once custody is settled, plus expected-committee
-  pinning in the verifiers (`verify_with_committee` in the SDK, an
-  `expectedSigners` option in the JS/Python clients and the browser
-  verifier) — today every verifier checks against the `signers` array
-  carried in the same response, which the site copy now states honestly.
-- Later, not built: hosted-committee signatures over `blake2b(price_bytes)`
-  (a `covenant` object per feed — the prerequisite for gating on the HOSTED
-  committee on-chain; today's covenant guide honestly uses a demo committee),
-  an `/api/committee` endpoint, per-IP rate limiting (lift kascov's
-  ToolLimiter if `/og` abuse shows in logs), custom-domain mapping.
+- If a CDN is ever put in front, keep API clients pointed at the ORIGIN
+  directly — today `pulse.kascov.io` straight to the VPS, not a cached edge
+  (kascov lesson: CDN buffering vs `no-store` responses).
+- **`KASPULSE_BIND=127.0.0.1` is load-bearing, not cosmetic.** The `/og` rate
+  limiter only trusts `X-Forwarded-For` when the listener is bound to loopback
+  (otherwise any client forges its own bucket), and it takes the **LAST** XFF
+  entry because Caddy's bare `reverse_proxy 127.0.0.1:<port>` APPENDS the true
+  peer. Change the hop count — put a CDN in front, or set an explicit
+  `header_up X-Forwarded-For` in the Caddyfile — and that "last entry" rule has
+  to be re-derived in `request_head()` (src/http.rs), or the whole internet goes
+  back into one bucket.
+- Built since this list was written: the `/v1/committee` pin artifact,
+  expected-committee pinning in the SDK (`verify_with_committee`) and in the
+  JS/Python clients (`verifyWithCommittee` / `verify_with_committee`), and
+  per-IP `/og` rate limiting (120 req/min).
+- Later, not built: committee-key **custody** (the five pubkeys are published,
+  but they all live on one box — see README's honest status), pinning in the
+  in-browser verifier `web/vendor/verify.js` (it still checks against the
+  `signers` array in the same response, which the site copy states honestly),
+  custom-domain mapping.
+- Withdrawn, not later: hosted-committee signatures over `blake2b(price_bytes)`
+  (`covenant.signatures`). It shipped, then came out on 2026-07-27 — the
+  preimage binds no pair/expo/round/ts, so one feed's sigs spent any
+  lower-strike gate on any pair. The bound `kaspulse/cov/v2` replacement is
+  specified in docs/MESSAGE-FORMAT.md §8.0 and not shipped; the covenant guide
+  uses a local demo committee, which is the correct pattern today.

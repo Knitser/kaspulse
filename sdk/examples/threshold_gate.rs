@@ -4,9 +4,13 @@
 //!
 //! Run: cargo run -p kaspulse-sdk --example threshold_gate --features covenant
 //!
-//! Honest note: this uses a locally-generated DEMO committee (fixed test keys).
-//! The hosted kaspulse committee signs the v2 message string, not
-//! blake2b(price_bytes) — see the repo README's Status section.
+//! Honest note: this uses a locally-generated DEMO committee (fixed test keys),
+//! and a demo committee is the ONLY committee this script can have today. The
+//! hosted kaspulse committee signs the v2 message string and nothing else: its
+//! covenant domain (blake2b(price_bytes)) was withdrawn on 2026-07-27 and
+//! /v1/feed no longer publishes `covenant.signatures`. Never build one of these
+//! against `feed.signers` — no key will ever sign for it and there is no reclaim
+//! branch. See docs/MESSAGE-FORMAT.md §8.0.
 
 use kaspulse_sdk::covenant::{self, Gate, Prefix};
 

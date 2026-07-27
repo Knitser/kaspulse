@@ -155,57 +155,117 @@ unchanged, heartbeat not yet due). Consumers enforce staleness against
 
 ## 8. On-chain encodings (bond record, price_bytes)
 
-Two fixed binary encodings are used by the covenant tooling. The hosted
-committee dual-signs:
+Two fixed binary encodings are used by the covenant tooling.
 
-1. the §1 *message string* (off-chain clients / SDK `Feed::verify`)
-2. `blake2b(price_bytes)` and the 24-byte attestation record (on-chain
-   covenants / SDK `Feed::verify_covenant`)
+### 8.0 WITHDRAWN, 2026-07-27: the unbound covenant signature
 
-Each feed JSON includes a `covenant` object:
+**`covenant.signatures` is no longer published, and this spec no longer
+defines a hosted covenant-signature domain.** Earlier builds published five
+BIP340 signatures over `blake2b-256(price_bytes)` under each feed's `covenant`
+object, and earlier revisions of this section told you to use them in
+production. Do not.
 
-```json
-"covenant": {
-  "price_e8": 8240000,
-  "price_bytes": "80bb7d",
-  "signatures": ["…", "…", "…", "…", "…"],
-  "record": "b84ad8389aa2ebb0…",
-  "record_signatures": ["…", "…", "…", "…", "…"]
-}
+**They are not revoked, and we cannot revoke them.** The committee keys are
+unchanged — the same five x-only pubkeys are still served by `/v1/committee`
+— so every covenant-domain signature anyone captured while that field was live
+still verifies today and will verify forever, and still satisfies any
+`AtOrAbove` gate below the price it covered (or, for the feeds that quantized
+to `price_e8 = 0`, every `AtOrBelow` gate). BIP340 has no revocation; only key
+rotation would orphan them, and rotation has not happened. That is precisely
+why nobody may build a covenant on the hosted committee: not because the old
+signatures stopped working, but because they never stop working.
+
+**Why it was withdrawn.** The signed preimage was `price_bytes` and nothing
+else: the bare integer `price_e8`, with no pair, no exponent, no round and no
+timestamp in it. So a signature was never a statement about *a price* — it was
+a statement about *a number*, and the same number occurs in every feed's
+strike space. BTC/USD's published signature over `6524045000000` therefore
+satisfied any `AtOrAbove` price gate on **any** pair whose strike was lower,
+which is every realistic KAS or KRC-20 gate; feeds whose price quantized to
+`price_e8 = 0` (sub-1e-8 tokens do) carried valid signatures over
+`blake2b-256("")` and satisfied every `AtOrBelow` gate permanently; and
+nothing in the encoding ever expired, so every attestation was replayable
+forever. That is not a tuning problem, it is a missing domain — the only
+correct action is to stop publishing it.
+
+`Feed::verify_covenant()` in the SDK hard-errors on this domain rather than
+verifying it. `price_e8`, `price_bytes`, `record` and `record_signatures`
+remain in the `covenant` object; `record`/`record_signatures` are the bond
+domain (§8.1), which **is** bound to pair and round.
+
+**Not yet shipped: `kaspulse/cov/v2`.** The replacement binds the price to its
+pair, exponent, round and timestamp in one preimage:
+
+```
+preimage = "kaspulse/cov/v2"
+         ‖ blake2b-256(PAIR)[0..8]      # 8-byte pair id
+         ‖ expo   as i8                 # 1 byte
+         ‖ round  as u64 big-endian     # 8 bytes
+         ‖ ts     as u64 big-endian     # 8 bytes
+         ‖ mant   as little-endian minimal script number
+sig = BIP340_Sign(node_key, m = blake2b-256(preimage))
 ```
 
-`signatures` are BIP340 over `blake2b-256(price_bytes)`; `record_signatures`
-are BIP340 over `blake2b-256(record)`. Same `signers[]` order as the v2
-message signatures. Pin the committee via `GET /v1/committee` and
-`Feed::verify_with_committee` so keys are not learned only from the feed.
+It signs `mant`+`expo`, not `price_e8`, because e8 quantization loses more
+than 1% on six live pairs and 100% on the sub-1e-8 ones. The redeem script
+binds the 24-byte tag‖pair‖expo prefix with `OpSubstr` and compares the
+mantissa tail; round/ts are bound cryptographically rather than compared in
+script (Kaspa script numbers are minimal-LE, so a fixed-width 8-byte BE round
+is not a usable numeric operand — freshness belongs in an nSequence/DAA
+relative timelock on the spend). **This is design, not shipped code.** When it
+ships it will appear as `covenant.preimage` + `covenant.signatures` under a
+version bump, and it will be re-proven on testnet-10 before this document
+recommends it. Until then there is **no** hosted covenant domain: the only
+covenant path that exists is the local demo committee in `/guide.html`.
 
-The `/guide.html` demo path can still use a local 3-key committee for a
-fully offline walkthrough; production consumers should use the hosted
-`covenant.signatures`.
+Pin the committee via `GET /v1/committee` and `Feed::verify_with_committee`
+so keys are not learned only from the feed — that applies to the §1 message
+domain, which is unaffected by any of the above.
 
-### 8.1 The 24-byte attestation record (equivocation bond)
+### 8.1 The 32-byte attestation record, v2 (equivocation bond)
 
 For the slashing bond, a node signs fixed-width records (from
 `src/slash.rs` / the oracle build loop):
 
 ```
-record (24 bytes) = blake2b-256(PAIR_ascii)[0..8]   # 8-byte pair id
+record (32 bytes) = blake2b-256("kaspulse/bond/v2|" ‖ PAIR_ascii)[0..8]
                   ‖ round  as u64 big-endian        # 8 bytes
                   ‖ mant   as u64 big-endian        # 8 bytes
-slot = record[0..16]  (pair id ‖ round)
+                  ‖ expo   as i64 big-endian        # 8 bytes (two's complement)
+slot = record[0..16]   (pair id ‖ round)
+tail = record[16..32]  (mant ‖ expo — the compared price)
 sig  = BIP340_Sign(node_key, m = blake2b-256(record))
 ```
 
-Two valid records with the **same slot** and a **different mant**, both signed
+Two valid records with the **same slot** and a **different tail**, both signed
 by one node key, are a proof of equivocation — the bond covenant verifies the
 proof on L1 and releases the bond to whoever supplies it. Worked example
-(PAIR `KAS/USD`, round 4242, mant 824000000):
+(PAIR `KAS/USD`, round 4242, mant 824000000, expo −10 — i.e. $0.0824):
 
 ```
-blake2b-256("KAS/USD") = b84ad8389aa2ebb0a431e100443aac71ecb52569d5eb0bccb7546c2bbc9be61f
-pair id  = b84ad8389aa2ebb0
-record   = b84ad8389aa2ebb0 0000000000001092 00000000311d3e00
+blake2b-256("kaspulse/bond/v2|KAS/USD")
+         = 9dab6487a796ddcb92bfa3ae1290d099d6e9a24c681b82927da88035de203b9d
+pair id  = 9dab6487a796ddcb
+record   = 9dab6487a796ddcb 0000000000001092 00000000311d3e00 fffffffffffffff6
 ```
+
+(Pinned by `tests::price_bytes_and_record_layout` in `src/main.rs` and
+`covenant_tests::attestation_record_layout` in the SDK, so this vector cannot
+drift from the code again.)
+
+**`expo` is in the compared tail on purpose.** Without it, mant 293800000 at
+expo −10 and at expo −9 produce byte-identical records: a 10× price move would
+be provably *unslashable*. **The pair id is domain-separated** so a v1 record
+can never share a slot with a v2 one.
+
+**Migration — v1 and v2 are mutually unslashable.** Records changed on
+2026-07-27. Earlier revisions of this section specified a 24-byte record
+`blake2b-256(PAIR)[0..8] ‖ round ‖ mant` (pair id `b84ad8389aa2ebb0` for
+`KAS/USD`). `bond_redeem` / `bond_redeem_with_reclaim` moved their `OpSubstr`
+indices from `(16,24)` to `(16,32)`, which is a different script and therefore
+a different P2SH address: a v1 bond aborts on every record the oracle now
+signs, and a v2 bond aborts on every v1 record. **Any bond already posted
+behind a v1 redeem must be reclaimed and re-posted behind the v2 one.**
 
 ### 8.2 price_bytes — minimal script-number encoding
 
@@ -221,8 +281,9 @@ otherwise    → little-endian bytes of |price_e8|, minimal length;
 
 Examples: `8240000` (= $0.0824 e8) → `80bb7d`; `128` → `8000`; `127` → `7f`.
 Non-minimal encodings break the on-chain numeric comparison — encode exactly
-this way. The demo nodes sign `BIP340(m = blake2b-256(price_bytes))`. The hosted
-oracle publishes the same domain under `feed.covenant.signatures`.
+this way. The `/guide.html` **demo** committee signs
+`BIP340(m = blake2b-256(price_bytes))`; the hosted committee no longer does
+(§8.0), so `price_bytes` is today an encoding, not an attestation domain.
 
 ## 9. Test vectors
 
@@ -305,3 +366,16 @@ A conforming verifier, in order:
 6. Then honor the safety flags — `halted`, `thin`, `degraded`,
    `peg_ok == false` — and check freshness against `signed_ts`. Valid
    signatures over a halted or stale price are still a price you shouldn't use.
+
+**What the signature does and does not cover.** The v2 message is exactly the
+six fields of §1. Everything else in the feed JSON — the safety flags
+(`halted`, `degraded`, `thin`, `peg_ok`, `divergent`), the depth figures
+(`move_10pct_usd`, `depth_2pct_usd`, `liq_wkas`, `venues`), the TWAP fields
+(`twap`, `twap_samples`, `twap_window_s`) and `pool_age_s` — is **unsigned
+advisory metadata**. It is computed by the same process that signs, but a
+compromised server could alter it without breaking a single signature. Honor
+it (it is the oracle telling you when not to trust the number) while
+understanding that it is a server claim, not an attestation. It is deliberately
+not folded into the signed message: v2 is frozen and `Feed::verify` demands
+field equality, so adding fields to the message would break every published
+attestation and every existing verifier. Binding the flags is a v3 job.

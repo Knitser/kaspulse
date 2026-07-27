@@ -18,18 +18,28 @@ fn main() {
         Err(why) => { eprintln!("✗ do NOT use this feed: {why}"); return; }
     }
 
-    // 2. build a covenant: release funds only if KAS ≥ $0.02, signed by the nodes
+    // 2. build a covenant: release funds only if KAS ≥ $0.02, signed by 3 keys.
+    //
+    // The committee is a LOCAL DEMO committee, and today it can only be that.
+    // Building this script against `feed.signers` would be a trap: the hosted
+    // committee's covenant domain (blake2b(price_bytes)) was WITHDRAWN on
+    // 2026-07-27 — /v1/feed no longer publishes `covenant.signatures`, so nobody
+    // will ever produce a witness for that P2SH, and `price_gate_redeem` has no
+    // reclaim branch. Anything funded there is unspendable. See §4 of
+    // sdk/README.md and docs/MESSAGE-FORMAT.md §8.0.
     #[cfg(feature = "covenant")]
     {
-        let committee: Vec<[u8; 32]> = feed.signers[..3].iter()
-            .map(|h| { let b = hex::decode(h).unwrap(); let mut a = [0u8; 32]; a.copy_from_slice(&b); a }).collect();
+        let secp = secp256k1::Secp256k1::new();
+        let committee: Vec<[u8; 32]> = (1u8..=3).map(|i| {
+            secp256k1::Keypair::from_secret_key(&secp, &secp256k1::SecretKey::from_slice(&[i; 32]).unwrap())
+                .public_key().x_only_public_key().0.serialize()
+        }).collect();
         let redeem = kaspulse_sdk::covenant::price_gate_redeem(&committee, 2_000_000);
-        println!("price-gate covenant redeem: {} bytes", redeem.len());
+        println!("\ndemo-committee price-gate redeem: {} bytes", redeem.len());
         println!("P2SH (TN10): {}", kaspulse_sdk::covenant::p2sh_address(&redeem, kaspulse_sdk::covenant::Prefix::Testnet).unwrap());
-        println!("→ fund it, and it spends only with 3 node sigs + price ≥ $0.02");
-        // honest note: gating ON-CHAIN on these hosted signers requires them to
-        // sign blake2b(price_bytes) — today the hosted committee signs the v2
-        // message string. The `gate` bin demonstrates the on-chain flow with a
-        // local demo committee; see the repo README's Status section.
+        println!("→ this spends with 3 DEMO node sigs + price ≥ $0.02. Do NOT fund a gate");
+        println!("  built from feed.signers: the hosted covenant domain is withdrawn and");
+        println!("  there is no reclaim branch — the coin would be unspendable forever.");
+        println!("  Run the whole flow with: cargo run --bin gate --features onchain -- demo --strike 0.02 --value 3");
     }
 }

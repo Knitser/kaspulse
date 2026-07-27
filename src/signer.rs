@@ -16,7 +16,34 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Signer tick — also the round-slot width, so `round` is a wall-clock slot.
+const TICK_MS: u64 = 2_000;
+const ROUND_HWM_PATH: &str = "signer-round.hwm";
+const ROUND_HWM_LEASE: u64 = 30; // slots reserved on disk AHEAD of the one being issued (~60s at TICK_MS=2000)
+
 fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() }
+fn now_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 }
+/// Same reservation discipline as src/main.rs: the file holds `round + LEASE`,
+/// written BEFORE the round is issued, so it is always an upper bound on what
+/// this key has signed. A lazy flush after the fact leaves a floor *below* the
+/// last published round, and the restart re-signs those slots.
+fn read_round_hwm() -> u64 {
+    match std::fs::read_to_string(ROUND_HWM_PATH) {
+        Ok(s) => match s.trim().parse::<u64>() {
+            Ok(v) => v,
+            Err(e) => { eprintln!("KASPULSE_ROUND_HWM_UNREADABLE: {ROUND_HWM_PATH} = {:?} ({e}) — no replay floor this boot", s.trim()); 0 }
+        },
+        Err(_) => 0,
+    }
+}
+/// tmp + rename — `fs::write` truncates in place, so a crash mid-write could
+/// leave a short file that parses as a lower floor.
+fn write_round_hwm(hwm: u64) {
+    let tmp = format!("{ROUND_HWM_PATH}.tmp");
+    if let Err(e) = std::fs::write(&tmp, hwm.to_string()).and_then(|_| std::fs::rename(&tmp, ROUND_HWM_PATH)) {
+        eprintln!("signer-round.hwm write failed: {e}");
+    }
+}
 fn agent() -> ureq::Agent { ureq::AgentBuilder::new().timeout(Duration::from_secs(7)).build() }
 fn get(a: &ureq::Agent, u: &str) -> Option<serde_json::Value> { a.get(u).call().ok()?.into_json().ok() }
 fn pf(v: &serde_json::Value) -> Option<f64> { v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_f64()) }
@@ -60,8 +87,19 @@ fn main() {
     {
         let (out, kp) = (out.clone(), kp);
         std::thread::spawn(move || {
-            let mut round = 1u64;
+            // wall-clock SLOT, not a counter — see the same fix in src/main.rs. A
+            // per-process counter replays slots 1..N at different prices under the
+            // same operator key on every restart, which is exactly the equivocation
+            // condition the bond covenant slashes on. MS resolution so one slot can
+            // never hold two different mantissas.
+            let mut hwm = read_round_hwm();
+            let mut reserved = hwm;
             loop {
+                let slot = now_ms() / TICK_MS;
+                if slot <= hwm { eprintln!("KASPULSE_ROUND_REGRESSION slot={slot} hwm={hwm} — clock went backwards; issuing hwm+1"); }
+                let round = slot.max(hwm + 1);
+                hwm = round;
+                if round >= reserved { reserved = round + ROUND_HWM_LEASE; write_round_hwm(reserved); } // reserve before signing
                 let ts = now();
                 let mut objs = Vec::new();
                 for pair in ["KAS/USD", "BTC/USD", "ETH/USD"] {
@@ -73,8 +111,7 @@ fn main() {
                 }
                 *out.lock().unwrap() = format!("[{}]", objs.join(","));
                 println!("round {round}: signed {} pairs", objs.len());
-                round += 1;
-                std::thread::sleep(Duration::from_secs(2));
+                std::thread::sleep(Duration::from_millis(TICK_MS));
             }
         });
     }

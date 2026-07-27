@@ -121,12 +121,12 @@ The daemon logs one line per round (`round N: signed M pairs`). Watch for:
 Economic security comes from an **equivocation bond**: a coin locked by a
 covenant that pays out to *anyone* who proves your key signed two different
 prices for the same slot. The mechanics are in
-[MESSAGE-FORMAT.md §8.1](MESSAGE-FORMAT.md#81-the-24-byte-attestation-record-equivocation-bond)
-(the 24-byte attestation record); the covenant and a real slash on testnet-10
-are reproduced by:
+[MESSAGE-FORMAT.md §8.1](MESSAGE-FORMAT.md#81-the-32-byte-attestation-record-v2-equivocation-bond)
+(the 32-byte attestation record: pair id ‖ round ‖ mant ‖ expo); the covenant is
+reproduced by:
 
 ```sh
-cargo run --bin slash --features onchain        # local script-engine proof, 4 cases
+cargo run --bin slash --features onchain        # local script-engine proof, 5 cases
 cargo run --bin slash_live --features onchain   # deploys a real bond on TN10 and slashes it
 ```
 
@@ -137,7 +137,7 @@ node key and funds it (from `~/.kaspulse/tn10.key` — testnet only, today).
 plus `reclaim_witness` — after the relative DAA timelock, the node can reclaim
 without a slash proof. Prefer that redeem when posting long-lived bonds.
 
-**Exactly what is slashable** — the four cases `slash` proves on the script
+**Exactly what is slashable** — the five cases `slash` proves on the script
 engine (`src/slash.rs`):
 
 | case | example | slashed? |
@@ -146,13 +146,12 @@ engine (`src/slash.rs`):
 | honest update — different rounds, different prices | `#42` $0.029, then `#43` $0.058 | no |
 | re-signing the same price for the same slot | `#42` $0.029, twice | no |
 | a second signature forged with a different key | attacker "frames" you | no — the script checks both sigs against *your* pubkey |
+| same mantissa, different **exponent** — a 10× move | `#42` mant 2900000 at expo −10 **and** at expo −9 | **yes**, since the v2 record — under the old 24-byte layout this was provably unslashable |
 
 In short: **the only slashable act is signing two prices for one slot.** Being
 offline, being slow, or disagreeing with the median is not slashable by this
 covenant — an honest node that only ever signs what it measured, once per
-slot, cannot lose its bond. (The honest-reclaim timelock branch is deliberately
-not in the SDK yet — unproven code doesn't ship; until then treat a posted
-bond as one-way. Testnet only.)
+slot, cannot lose its bond. (Testnet only.)
 
 ## 7. Operator checklist
 

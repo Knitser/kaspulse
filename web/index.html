@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>kaspulse — the covenant-ready price oracle for Kaspa</title>
-  <meta name="description" content="Every price Kaspa needs, signed &amp; verifiable: 60+ live feeds — majors (sub-second) + 55+ KRC-20 tokens (chain-bound) — each a median of independent venues, 3-of-5 threshold-signed, verifiable by anyone, consumable by a Kaspa covenant on L1.">
+  <meta name="description" content="Every price Kaspa needs, signed &amp; verifiable: 60+ live feeds — majors (sub-second, a median of independent exchange venues) + 55+ KRC-20 tokens read straight from DEX pool reserves, with the trade size that moves each one 10% published per feed. 3-of-5 threshold-signed, verifiable by anyone, consumable by a Kaspa covenant on L1.">
   <meta property="og:type" content="website">
   <meta property="og:title" content="kaspulse — the covenant-ready price oracle for Kaspa">
-  <meta property="og:description" content="60+ live feeds, median of independent venues, 3-of-5 threshold-signed, verifiable in your browser — consumable by a Kaspa covenant on L1.">
+  <meta property="og:description" content="60+ live feeds — majors from independent exchange venues, 55+ KRC-20 from DEX pool reserves — 3-of-5 threshold-signed, verifiable in your browser, consumable by a Kaspa covenant on L1.">
   <!-- root-relative on disk; the server absolutizes content="/og…" via BASE_URL
        (scrapers require absolute og:image URLs) -->
   <meta property="og:image" content="/og.png">
@@ -53,7 +53,7 @@
   <template id="tpl-dev">
     <section class="sec">
       <h2 class="section-h">API reference</h2>
-      <p class="section-sub">One JSON API, no auth, no keys, CORS-open (<code class="mono">Access-Control-Allow-Origin: *</code>). Base URL: this page&rsquo;s origin — a <code class="mono">*.run.app</code> origin for now, until a domain is chosen. Only the endpoints below exist; <code class="mono">/v1</code> is the canonical surface, the legacy <code class="mono">/api/*</code> aliases are permanent.</p>
+      <p class="section-sub">One JSON API, no auth, no keys, CORS-open (<code class="mono">Access-Control-Allow-Origin: *</code>). Base URL: <code class="mono">https://pulse.kascov.io</code> (every example below uses this page&rsquo;s own origin). Only the endpoints below exist; <code class="mono">/v1</code> is the canonical surface, the legacy <code class="mono">/api/*</code> aliases are permanent.</p>
       <div class="api-layout">
         <nav class="api-nav" id="api-nav">
           <span class="grp">start</span>
@@ -73,7 +73,8 @@
 
           <article class="api-endpoint" id="ep-intro">
             <h3>Introduction</h3>
-            <p>kaspulse serves signed price feeds: each price is a median of independent venues, threshold-signed by a 5-node committee (3-of-5), and carries everything needed to verify it — the exact signed message, the signer pubkeys and the signatures. <b>Never trust the API — verify.</b> The oracle and its signatures are live and real; on-chain consumers are proven on Kaspa testnet-10, mainnet publishing is next.</p>
+            <p>kaspulse serves signed price feeds, threshold-signed by a 5-node committee (3-of-5), each carrying everything needed to verify it — the exact signed message, the signer pubkeys and the signatures. <b>Never trust the API — verify.</b> The oracle and its signatures are live and real; on-chain consumers ran on Kaspa testnet-10 &mdash; the bond record changed on 2026-07-27, so the slashing script is currently proven on the real script VM and awaits a fresh TN10 run. Mainnet publishing is next.</p>
+            <p><b>Two kinds of feed, and they are not the same product.</b> <code class="mono">kind:"major"</code> (KAS, BTC, ETH) is a MAD-filtered median across independent exchange venues — read <code class="mono">sources[]</code> for which ones, this round. <code class="mono">kind:"krc20"</code> is a read of DEX pool reserves: <b>pool STATE, not executed trades</b> — the constant-product ratio at which the pool would trade, whether or not anyone has traded in it for months. Most KRC-20 feeds have exactly one pool behind them, so <code class="mono">spread_bps: 0.00</code> there means &ldquo;no second venue&rdquo;, not &ldquo;venues agree&rdquo;. Use <code class="mono">move_10pct_usd</code> (what a 10% move costs to buy) and <code class="mono">pool_age_s</code> (how long since those reserves last moved) to size the risk — that is what they are published for.</p>
             <p>All endpoints are <code class="mono">GET</code> (plus <code class="mono">HEAD</code>/<code class="mono">OPTIONS</code>); live data is served <code class="mono">Cache-Control: no-store</code>. Poll — there is deliberately no push stream.</p>
             <div class="codebox"><pre class="code"><span class="c-c"># everything, one round, ~60 feeds</span>
 curl <span class="c-s">$ORIGIN/v1/feed</span>
@@ -146,7 +147,7 @@ python3 kaspulse.py verify KAS/USD <span class="c-s">$ORIGIN</span></pre></div>
             <div class="ep-route"><span class="method">GET</span><span class="ep-path">/v1/feed/{PAIR}</span></div>
             <p>One FeedObj. <code class="mono">PAIR</code> is dash form, case-insensitive: <code class="mono">KAS-USD</code> ↔ pair <code class="mono">"KAS/USD"</code>. Unknown pair → real HTTP <b>404</b> with body <code class="mono">{"error":"no such feed"}</code> (the legacy alias <code class="mono">/api/feed/{PAIR}</code> now 404s too). </p>
             <div class="codebox"><pre class="code">curl <span class="c-s">$ORIGIN/v1/feed/KAS-USD</span></pre></div>
-            <div class="codebox"><pre class="code"><span class="c-c">// captured from a live round (arrays abridged)</span>
+            <div class="codebox"><pre class="code"><span class="c-c">// the shape of one feed (arrays abridged; live values, moves every round)</span>
 {
   "pair": "KAS/USD", "kind": "major",
   "price": 0.02955, "price_e8": 2955000,
@@ -156,10 +157,14 @@ python3 kaspulse.py verify KAS/USD <span class="c-s">$ORIGIN</span></pre></div>
     { "name": "KuCoin",  "price": 0.02955,  "age_ms": 12890 },
     { "name": "MEXC",    "price": 0.029564, "age_ms": 12279 }
   ],
-  "num_sources": 3, "outliers": [],
+  "num_sources": 3, "outliers": [], "divergent": false,
   "halted": false, "degraded": false, "freshest_ms": 12279,
-  "low": 0.02955, "high": 0.029564, "spread_bps": 4.74,
-  "median": 0.02955, "twap": true, "liq_wkas": 0.0, "thin": false,
+  "low": 0.02955, "high": 0.029564, "spread_bps": 4.74, "median": 0.02955,
+  <span class="c-c">// majors are an instantaneous median — never TWAPed:</span>
+  "twap": false, "twap_samples": 0, "twap_window_s": 0,
+  <span class="c-c">// depth is a pool concept; majors are CEX-sourced, so it is null:</span>
+  "liq_wkas": 0.0, "thin": false,
+  "move_10pct_usd": null, "depth_2pct_usd": null, "pool_age_s": null,
   "signers": [ "0dd71bf25a98da9ff89a661537997fc9…", <span class="c-c">/* ×5 */</span> ],
   "threshold": 3,
   "signatures": [ "7eb9f2973d6976da3dc8bdc29d66e697…", <span class="c-c">/* ×5 */</span> ],
@@ -167,16 +172,42 @@ python3 kaspulse.py verify KAS/USD <span class="c-s">$ORIGIN</span></pre></div>
   "signed_ts": 1783791092, "signed_round": 183775,
   "history": [ [1783791030, 0.02955], <span class="c-c">/* ~120 [ts, price] points */</span> ]
 }</pre></div>
+            <p>A KRC-20 feed carries the same shape plus the pool fields. This is a real two-pool feed — the numbers move every round:</p>
+            <div class="codebox"><pre class="code">{
+  "pair": "KREX/USD", "kind": "krc20",
+  "price": 6.97e-6, "mant": 697040000, "expo": -14,
+  "sources": [
+    { "name": "Kasplex-Zealous", "price": 5.679e-6, "age_ms": 3120 },
+    { "name": "Igra-Zealous",    "price": 8.266e-6, "age_ms": 2870 }
+  ],
+  "num_sources": 2, "spread_bps": 3710.5, "divergent": true,   <span class="c-c">// the two pools disagree by 37%</span>
+  "twap": true, "twap_samples": 12, "twap_window_s": 60,   <span class="c-c">// MEASURED oldest→newest, not samples × 5 s</span>
+  "liq_wkas": 3629.0,
+  "move_10pct_usd": 0.39,        <span class="c-c">// trade size to move THIS feed 10%, on the SHALLOWEST pool</span>
+  "depth_2pct_usd": 0.08,
+  "thin": true,                  <span class="c-c">// := move_10pct_usd &lt; $250</span>
+  "pool_age_s": 190800,          <span class="c-c">// the winning venue's reserves last moved ~53h ago</span>
+  "venues": [
+    { "chain": "kasplex", "liq_wkas": 3628.8, "move_10pct_usd": 5.22 },
+    { "chain": "igra",    "liq_wkas":  267.9, "move_10pct_usd": 0.39 }
+  ],
+  "peg_ok": true
+}</pre></div>
             <p><b>The fields worth honoring.</b> A consumer that reads <code class="mono">price</code> and ignores the flags is doing it wrong — the flags are the oracle telling you when <i>not</i> to trust the number:</p>
             <div class="ep-table-wrap"><table class="ep-table">
               <tr><th>field</th><th>type</th><th>meaning</th></tr>
-              <tr><td>halted</td><td>bool</td><td>circuit breaker tripped — do not consume this round</td></tr>
-              <tr><td>thin</td><td>bool</td><td>shallow pool — price is real but easily moved; honor it</td></tr>
+              <tr><td>halted</td><td>bool</td><td>do not consume this round. Set by the circuit breaker (a &gt;20% one-round jump publishes the last good price until it persists), and on a KRC-20 feed also when its TWAP window is less than half full <i>or</i> when <b>KAS/USD itself is halted</b> — a KRC-20 price is a KAS price × a pool ratio, so a held KAS quote makes every one of them wrong by the same amount</td></tr>
+              <tr><td>move_10pct_usd</td><td>f64|null</td><td><b>KRC-20: the number to read.</b> USD trade size that moves this feed&rsquo;s price 10%, computed on the <i>shallowest</i> contributing pool (<code>dx = R·(√1.1−1)/0.997</code> × KAS/USD). <code>null</code> on majors — they are CEX-sourced, not pool-sourced. It is a <i>trade size</i>, not a net cost: the attacker still faces arbitrage and must hold the move across the TWAP window</td></tr>
+              <tr><td>depth_2pct_usd</td><td>f64|null</td><td>same at 2% — the everyday-slippage number</td></tr>
+              <tr><td>thin</td><td>bool</td><td><code>move_10pct_usd &lt; $250</code>. Real price, shallow book, cheaply moved — honor it</td></tr>
+              <tr><td>pool_age_s</td><td>u64|null</td><td>seconds since the winning venue&rsquo;s reserves last changed, measured against that chain&rsquo;s head timestamp. <b>Touch age, not trade age</b> — mint/burn/sync move it too. Days-old values are normal here and are <i>not</i> visible in <code>freshest_ms</code></td></tr>
+              <tr><td>divergent</td><td>bool</td><td>≥2 sources and <code>spread_bps &gt; 500</code> — the venues genuinely disagree and the published price is between them, i.e. one no venue quotes</td></tr>
               <tr><td>degraded</td><td>bool</td><td>fewer venues than nominal — widen your margins</td></tr>
               <tr><td>peg_ok</td><td>bool</td><td>KRC-20 only — false when the WKAS/USDC peg looks off; absent on majors</td></tr>
-              <tr><td>freshest_ms</td><td>u64</td><td>age of the freshest venue at serve time</td></tr>
+              <tr><td>freshest_ms</td><td>u64</td><td>age of the freshest venue <i>read</i> at serve time. On KRC-20 this is how recently we polled the RPC, <b>not</b> how recently the price moved — that is <code>pool_age_s</code></td></tr>
               <tr><td>outliers</td><td>[str]</td><td>venues MAD-filtered out of this round&rsquo;s median</td></tr>
             </table></div>
+            <p class="dim" style="font-size:12.5px"><b>All of the above is UNSIGNED advisory metadata.</b> The committee signs exactly <code class="mono">kaspulse/v2|PAIR|mant|expo|ts|round</code> — pair, price, time, round. The flags, the depth figures, the TWAP fields and <code class="mono">pool_age_s</code> sit <i>next to</i> the attestation, not inside it: a compromised server could change them without breaking a signature. They are not added to the signed message because v2 is frozen and every verifier demands exact field equality — binding them is a v3 job, and we would rather say that than imply a guarantee we don&rsquo;t deliver.</p>
             <p>Everything else:</p>
             <div class="ep-table-wrap"><table class="ep-table">
               <tr><th>field</th><th>type</th><th>meaning</th></tr>
@@ -186,9 +217,12 @@ python3 kaspulse.py verify KAS/USD <span class="c-s">$ORIGIN</span></pre></div>
               <tr><td>price_e8</td><td>i64</td><td>price × 1e8 — the unit on-chain covenants gate on</td></tr>
               <tr><td>sources</td><td>[obj]</td><td>per-venue {name, price, age_ms}</td></tr>
               <tr><td>num_sources</td><td>usize</td><td>venues in the median after filtering</td></tr>
-              <tr><td>low / high / spread_bps / median</td><td>f64</td><td>venue range, spread (bps) and raw median this round</td></tr>
-              <tr><td>twap</td><td>bool</td><td>KRC-20 pool reads are time-weighted; always true today</td></tr>
-              <tr><td>liq_wkas</td><td>f64</td><td>pool depth in WKAS (KRC-20; 0 on majors)</td></tr>
+              <tr><td>low / high / spread_bps / median</td><td>f64</td><td>venue range, spread (bps) and raw median this round. With one source, <code>low == high == price</code> and <code>spread_bps</code> is 0.00 — that is &ldquo;no second venue&rdquo;, not agreement</td></tr>
+              <tr><td>twap</td><td>bool</td><td>true only when this is a KRC-20 feed <i>and</i> its window is full (12 samples). False on majors — they are instantaneous medians — and false on a KRC-20 feed until 12 pool rounds have accumulated: after a restart, and again after any gap in the pool reads longer than 30 s, which clears the window rather than letting stale samples pose as a warm one. A pool round is <code class="mono">SLOW_EVERY</code> (5 s) <i>plus</i> however long the RPCs take for 65 pools, so read the elapsed time off <code class="mono">twap_window_s</code>, not off a clock</td></tr>
+              <tr><td>twap_samples</td><td>u32</td><td>samples actually in the window right now (0 on majors)</td></tr>
+              <tr><td>twap_window_s</td><td>u32</td><td><b>Measured</b>: the elapsed seconds between the oldest and the newest sample actually in the window of the venue that set the depth figures. Not <code class="mono">twap_samples × 5 s</code> — that nominal form was wrong in both directions, because a pool round takes as long as the RPCs take. This is also a staleness bound: the price you are reading is an average over the last <code class="mono">twap_window_s</code> seconds, so part of it is that old</td></tr>
+              <tr><td>liq_wkas</td><td>f64</td><td>pool depth in WKAS of the <i>deepest</i> contributing pool (KRC-20; 0 on majors). Note this is the opposite end from <code>move_10pct_usd</code> / <code>depth_2pct_usd</code> / <code>pool_age_s</code>, which describe the <i>shallowest</i> — on a multi-venue feed the two numbers are about different pools. Prefer <code>move_10pct_usd</code>: WKAS is a moving target in dollars, and the shallow pool is the one an attacker uses</td></tr>
+              <tr><td>venues</td><td>[obj]</td><td>KRC-20 only, omitted on majors — per-chain <code>{chain, liq_wkas, move_10pct_usd}</code>, so you can see which pool set the depth number</td></tr>
               <tr><td>signers / signatures</td><td>[hex]</td><td>5 x-only pubkeys / 5 BIP340 sigs, index-paired</td></tr>
               <tr><td>threshold</td><td>u32</td><td>signatures required (3)</td></tr>
               <tr><td>message</td><td>str</td><td>the exact signed string — see &ldquo;the signed message&rdquo;</td></tr>
@@ -202,18 +236,21 @@ python3 kaspulse.py verify KAS/USD <span class="c-s">$ORIGIN</span></pre></div>
             <div class="ep-route"><span class="method">GET</span><span class="ep-path">/v1/feeds</span></div>
             <p>The light board: one small row per pair, built once per round. This is what dashboards should poll. Catalog rows are <b>not signed</b> — verify a pair&rsquo;s full feed before acting on it.</p>
             <div class="codebox"><pre class="code">curl <span class="c-s">$ORIGIN/v1/feeds</span></pre></div>
-            <div class="codebox"><pre class="code"><span class="c-c">// captured from a live round (rows abridged)</span>
+            <div class="codebox"><pre class="code"><span class="c-c">// the shape of a catalog row (rows abridged; live values, moves every round)</span>
 {
   "round": 183775, "timestamp": 1783791092, "count": 61,
   "feeds": [
     { "pair": "KAS/USD", "kind": "major", "price": 0.02955,
       "num_sources": 3, "halted": false, "degraded": false, "thin": false,
-      "liq_wkas": 0.0, "spread_bps": 4.74, "freshest_ms": 12279 },
+      "liq_wkas": 0.0, "spread_bps": 4.74, "freshest_ms": 12279,
+      "move_10pct_usd": null, "pool_age_s": null },
     { "pair": "yoni/USD", "kind": "krc20", "price": 7.863e-9,
       "num_sources": 1, "halted": false, "degraded": false, "thin": true,
-      "liq_wkas": 224.0, "spread_bps": 0.0, "freshest_ms": 3120 }
+      "liq_wkas": 224.0, "spread_bps": 0.0, "freshest_ms": 3120,
+      "move_10pct_usd": 0.32, "pool_age_s": 2419200 }
   ]
 }</pre></div>
+            <p class="dim" style="font-size:12.5px">Catalog rows carry <code class="mono">move_10pct_usd</code>, <code class="mono">pool_age_s</code> and the new <code class="mono">thin</code> so a board can be honest without fetching 61 full feeds. Same caveat as everywhere: catalog rows are unsigned.</p>
           </article>
 
           <article class="api-endpoint" id="ep-health">
@@ -248,8 +285,8 @@ curl -o card.png <span class="c-s">$ORIGIN/og/KAS-USD.png</span></pre></div>
 
       <div class="docs-cards">
         <a class="docs-card flag" href="/guide.html">
-          <div class="docs-card-h">The covenant guide <span class="badge proof">tested · real txids</span></div>
-          <p>From a signed price to a Kaspa covenant that enforces it — price gates, range settles and slashing, every step proven on testnet-10.</p>
+          <div class="docs-card-h">The covenant guide <span class="badge proof">reproducible on TN10</span></div>
+          <p>From a signed price to a Kaspa covenant that enforces it — price gates, range settles and slashing, every step run on testnet-10 with a <b>local demo committee</b>: the hosted covenant signature is withdrawn until a bound preimage ships.</p>
         </a>
         <a class="docs-card" href="#/dev">
           <div class="docs-card-h">API reference</div>
@@ -318,7 +355,7 @@ px = k.checked_value(feed)
 
       <div class="trust-strip">
         <h3 style="margin:0">The trust model in 60 seconds</h3>
-        <p><b>Measured:</b> seven exchanges + 55+ DEX pools, MAD-filtered median, circuit breakers — no single venue can move a feed. <b>Signed:</b> 5 nodes, 3 must agree, Schnorr over <code class="mono">kaspulse/v2|PAIR|mant|expo|ts|round</code> — no single node can forge a price. <b>Verifiable:</b> every response carries the message, the keys and the signatures, so anyone — browsers, one-file scripts, or a Kaspa covenant at spend time — can check the math instead of trusting the server. Which is exactly what this button does:</p>
+        <p><b>Measured — and the two halves are different.</b> The three majors are a MAD-filtered median across independent exchange venues, behind circuit breakers: no one venue moves those. The 55+ KRC-20 feeds are DEX pool reads, and most of them have <i>exactly one</i> pool — for those, that pool <i>is</i> the price, and moving it costs whatever <code class="mono">move_10pct_usd</code> says it costs. We publish that number per feed instead of claiming otherwise. <b>Signed:</b> 5 nodes, 3 must agree, Schnorr over <code class="mono">kaspulse/v2|PAIR|mant|expo|ts|round</code> — no single node can forge a price. <b>Verifiable:</b> every response carries the message, the keys and the signatures, so anyone — browsers, one-file scripts, or a Kaspa covenant at spend time — can check the math instead of trusting the server. Which is exactly what this button does:</p>
         <div id="docs-verify"><button class="btn" id="docs-verify-btn">verify KAS/USD in my browser</button><div id="docs-verify-out"></div></div>
       </div>
     </section>

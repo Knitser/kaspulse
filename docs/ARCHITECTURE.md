@@ -8,7 +8,7 @@ explains why the default build has no async runtime.
 ```mermaid
 flowchart LR
     subgraph ingest["ingestion"]
-        WS["WebSocket streams<br/>Kraken · Bybit · OKX · Coinbase<br/>(sub-second ticks)"]
+        WS["WebSocket streams<br/>Kraken · OKX · Coinbase<br/>(sub-second ticks)"]
         REST["REST poll, 5s<br/>KuCoin · Gate.io · MEXC"]
         POOLS["KRC-20 pool reads<br/>eth_call getReserves<br/>multi-RPC cross-check"]
         DISC["pool discovery<br/>3 DEX factories, every 10 min<br/>pools.json cache"]
@@ -34,14 +34,26 @@ flowchart LR
 
 ## The pipeline, stage by stage
 
-**1. Ingestion — seven exchanges plus the chain itself.** Majors (KAS, BTC,
-ETH) stream over WebSocket from Kraken, Bybit, OKX and Coinbase (BTC/ETH only —
+**1. Ingestion — exchange venues plus the chain itself.** Majors (KAS, BTC,
+ETH) stream over WebSocket from Kraken, OKX and Coinbase (BTC/ETH only —
 Coinbase doesn't list KAS); Kraken subscribes with `event_trigger=bbo` and
-prices the bid/ask mid so low-volume pairs stay fresh between trades. A slow
-REST thread adds KuCoin, Gate.io and MEXC every 5 s. Every write lands in one
+prices the bid/ask mid so low-volume pairs stay fresh between trades. Bybit is
+subscribed too and works from a normal machine, but its endpoint is blocked
+from the production VPS's IP, so it contributes to zero live feeds today —
+`src/verify.rs` still polls it, which is why the independent auditor's median
+can be computed over a venue set the server could not reach. A slow REST
+thread adds KuCoin, Gate.io and MEXC every 5 s. Every write lands in one
 shared price book (`pair → venue → (price, ts_ms)`); anything older than 30 s
 (`STALE_MS`) is ignored downstream. WS connections reconnect with exponential
 backoff (2 s → 30 s cap).
+
+**Read `sources[]`, not this paragraph.** How many venues actually stand behind
+a given feed is per-pair and per-round: not every venue lists every pair, an
+instrument can be delisted, a datacenter IP can be blocked, and a venue that
+stops ticking silently ages out at `STALE_MS`. The feed publishes the venue
+names and `num_sources` it actually used — that array is the truth, this list
+is the intent. Measured 2026-07-27 on the live deploy: BTC/USD and ETH/USD ran
+on 6 venues, KAS/USD on 4.
 
 **2. KRC-20 pool reads — our own on-chain source.** Each KRC-20 price comes
 from reading `getReserves()` directly on the DEX pair contract via `eth_call` —
@@ -50,8 +62,30 @@ RPCs**: with ≥2 RPCs configured (`KASPLEX_RPCS` / `IGRA_RPCS`), all responses
 must agree byte-for-byte or the read is dropped — a single compromised RPC
 can't move a price. The pool price (in WKAS) × the CEX KAS/USD median gives
 USD; each (pair, chain) keeps a 12-sample windowed median (~60 s TWAP at the
-5 s cadence) that kills single-block flash-loan spikes. Pools under 1000 WKAS
-of liquidity get `thin: true` — real price, shallow book, manipulable.
+5 s cadence) that kills single-block flash-loan spikes.
+
+**Say it plainly: a KRC-20 price is pool STATE, not an executed trade.** It is
+the constant-product ratio of two reserves at the moment we read them — the
+price at which the pool *would* trade, whether or not anyone has traded there
+in months. Most of these pools are quiet: measured across all 65 discovered
+pools on 2026-07-24, the median time since the reserves last changed was
+**16.4 days**, 44 of 65 had not moved in over 24 h, and the oldest was 304
+days. `freshest_ms` is the age of our *read*, which is always seconds — it is
+not the age of the price. That is why every KRC-20 feed also publishes
+`pool_age_s`: seconds since the winning venue's `blockTimestampLast`, measured
+against that chain's own head timestamp (Igra's head runs ~700 s behind wall
+clock, so wall clock would be wrong). Call it **touch age**, not trade age —
+UniV2's `_update` fires on mint/burn/sync too, so a fresh `pool_age_s` proves
+the reserves moved, not that someone swapped.
+
+Depth is published as money, not as a boolean: `move_10pct_usd` is the trade
+size (`dx = R_wkas·(√1.1 − 1)/0.997`, in USD) that would move this feed's
+price 10% on the **shallowest** contributing venue, `depth_2pct_usd` the same
+at 2%, and `venues[]` breaks both out per chain. `thin` is now derived from
+that figure (`move_10pct_usd < $250`) rather than from a raw WKAS floor — a
+1000-WKAS floor was ~$29 at KAS $0.029, which certified pools that $1.44 could
+move 10%. All of these are unsigned advisory fields; see
+[MESSAGE-FORMAT.md](MESSAGE-FORMAT.md) §10.
 
 **3. Pool discovery — self-maintaining coverage.** A background thread
 re-enumerates three DEX factories on-chain (Kasplex/Zealous, Igra/Zealous,
@@ -71,10 +105,14 @@ also the `KASPULSE_DISCOVERY_EMPTY` alert token in production logs.
 | circuit breaker | a >20 % one-round jump (`BREAK_PCT`) | publish the **last good** price with `halted: true`, until the move persists 12 rounds (`BREAK_ROUNDS`, ~5 s) — then it's a real move |
 | degraded | a major down to <2 live sources | `degraded: true` |
 | WKAS peg check | Igra's USDC/USD implied price outside ±2 % of $1.00 (`PEG_TOL`) | `peg_ok: false` on Igra-sourced feeds + envelope `peg` object — a bridge depeg makes every price on that chain suspect |
-| thin pool | KRC-20 pool liquidity < 1000 WKAS (`MIN_LIQ_WKAS`), re-measured every round | `thin: true` |
+| thin pool | KRC-20 `move_10pct_usd` < $250 (`MIN_MOVE10_USD`), re-measured every round | `thin: true` |
+| divergent venues | ≥2 sources and `spread_bps` > 500 (5%) | `divergent: true` — the venues genuinely disagree; the published price is between them |
 
 The flags are published, not hidden — a consumer that ignores `halted`,
-`thin`, `degraded` or `peg_ok` is choosing to.
+`thin`, `degraded` or `peg_ok` is choosing to. They are also **unsigned**: the
+v2 message covers pair/mant/expo/ts/round only, so the flags are a server
+claim standing next to an attestation, not part of it
+([MESSAGE-FORMAT.md](MESSAGE-FORMAT.md) §10). Binding them is a v3 job.
 
 **5. Signing — 5 nodes, 3-of-5, on change.** Every serve tick (400 ms) the
 build loop medians the fresh sources per pair, normalizes to `mant × 10^expo`
@@ -122,7 +160,7 @@ render cost.
 | `kaspulse-node-{0..4}.key` | the 5 committee secret keys (64-char hex) | gitignored (`*.key`). Local dev: files in the repo root, auto-generated with a warning if absent. **Production: injected as `KASPULSE_NODE_KEYS` from Secret Manager** (`scripts/setup-keys.sh`); with `KASPULSE_REQUIRE_KEYS=1` (deploy.sh sets it) missing/malformed keys log `KASPULSE_KEYS_MISSING` and exit — a keyless restart must never silently mint a new committee, because committee continuity is what verifiers pin |
 | `signer.key` (or the path you pass) | one independent operator's key for the `signer` daemon | gitignored; the operator's own |
 | `~/.kaspulse/tn10.key` | funded testnet-10 key used by the on-chain bins (`gate`, `consumer_live`, `slash_live`, `latency`) | outside the repo; testnet funds only |
-| `gate-node-{i}.key` | the local **demo** covenant committee written by `gate keygen` | gitignored; demo keys, honestly labeled — the hosted committee does not sign the covenant encoding yet (see [MESSAGE-FORMAT.md](MESSAGE-FORMAT.md) §8) |
+| `gate-node-{i}.key` | the local **demo** covenant committee written by `gate keygen`, and used by `gate`, `consumer_live` and `onchain` | gitignored; demo keys, honestly labeled — and today the **only** committee that signs a covenant encoding: the hosted covenant domain was withdrawn 2026-07-27 because its preimage bound nothing but a bare integer (see [MESSAGE-FORMAT.md](MESSAGE-FORMAT.md) §8.0). The on-chain bins moved off `kaspulse-node-*.key` the same day: they broadcast their signatures in a **public, permanent** TN10 witness, so withdrawing the field from the API only closed one of the two paths |
 | `pools.json` | discovered-pool cache (not a key) | committed snapshot; refreshed at runtime by discovery |
 
 ## Build features — and why the default build has no tokio
